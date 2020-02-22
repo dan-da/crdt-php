@@ -1,0 +1,16 @@
+{
+    "name": "dan-da/php-crdt-bounded-counter",
+    "minimum-stability": "dev",
+    "require": {
+        "php": ">=7.0",
+        "dan-da/strictmode-php": "1.0.1"
+    },
+
+    "require-dev": {
+        "dan-da/tester-php": "1.0.4"
+    },
+
+    "autoload": {
+        "classmap": ["src/"]
+    }
+}
