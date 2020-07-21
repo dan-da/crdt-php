@@ -1,5 +1,6 @@
 {
     "name": "dan-da/crdt-php",
+    "license": "mit",
     "minimum-stability": "dev",
     "require": {
         "php": ">=7.0",
