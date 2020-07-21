@@ -1,5 +1,5 @@
 {
-    "name": "dan-da/php-crdt-bounded-counter",
+    "name": "dan-da/crdt-php",
     "minimum-stability": "dev",
     "require": {
         "php": ">=7.0",
