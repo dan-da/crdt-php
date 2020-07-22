@@ -85,6 +85,14 @@ class log_op_move {
     }
 }
 
+// represents state of a single replica
+// at a given moment.
+//
+// consists of a list of log operations
+// and a tree.
+//
+// defined in paper as:
+//   type_synonym ('t, 'n, 'm) state = ('t, 'n, 'm) log_op list x ('n x 'm x 'n) set
 class state {
     public $log_op_list = [];
     public $tree;
@@ -105,6 +113,8 @@ class state {
     }
 }
 
+// Represents a parent, meta, child triple
+// that is stored in an unordered set in a tree 
 class tree_triple {
     public $parent_id;
     public $meta;
@@ -117,9 +127,15 @@ class tree_triple {
     }
 }
 
+// Represents a tree as a set (unordered list)
+// of (parent, meta child) triples.
+//
+// Presented in paper as:
+//   ('n x 'm x 'n)
 class tree {
     public $triples = [];
 
+    // helper for removing a triple based on child_id
     function rm_child($child_id) {
         foreach($this->triples as $idx => $tr) {
             if($tr->child_id == $child_id) {
@@ -128,7 +144,8 @@ class tree {
         }
     }
 
-    function is_equal($other) {
+    // test for equality between two trees.
+    function is_equal(tree $other) {
         // We must treat the triples array as an unordered set
         // (where the two sets are equal even if values are present
         // in a different order).
@@ -150,6 +167,8 @@ class tree {
 
 // ------ Operations / Functions ----------
 
+// finds parent of a given child node in a tree.
+// returns [parent_id, meta]
 function get_parent(tree $tree, $node_id) {
 
     foreach($tree->triples as $tr) {
@@ -176,6 +195,8 @@ function get_parent(tree $tree, $node_id) {
 // is 2 ancestor of 8?  yes.
 // is 2 ancestor of 5?   no.
 
+// determines if ancestor_id is an ancestor of node_id in tree.
+// returns bool
 function is_ancestor($tree, $node_id, $ancestor_id) {
     $ancestors = [];
 
@@ -199,7 +220,7 @@ function is_ancestor($tree, $node_id, $ancestor_id) {
 // The do_op function performs the actual work of applying
 // a move operation.
 //
-// This function takes as arguement a pair consisting of a 
+// This function takes as argument a pair consisting of a 
 // Move operation and the current tree and it returns a pair
 // consisting of a LogMove operation (which will be added to the log) and
 // an updated tree.
@@ -292,6 +313,8 @@ function redo_op(log_op_move $log, state $state) {
     return $state;
 }
 
+// See general description of apply/undo/redo above.
+//
 // The apply_op func takes two arguments:
 // a Move operation to apply and the current replica
 // state; and it returns the new replica state.
@@ -324,6 +347,8 @@ function apply_op(op_move $op1, state $state) {
  * Helper Routines for Testing
  *****************************************/
 
+// Applies list of operations to a new (or existing) state
+// and returns new state.
 function apply_ops(array $operations, state $prev_state = null) {
     $state = $prev_state ?: new state();
     foreach($operations as $op) {
@@ -333,17 +358,27 @@ function apply_ops(array $operations, state $prev_state = null) {
     return $state;
 }
 
-
+// returns a new globally unique ID. must not duplicate between
+// replicas.
+//
+// In practice, this would be some type of UUID
 function new_id() {
     static $ids = 0;
     return $ids++;
 }
 
+// returns present timestamp.
+// fixme: should be replaced by lamport timestamp (or dotted vector clock?)
+//
+// using a global clock/counter like this is cheating.
 function timestamp() {
     static $clock = 0;
     return $clock++;
 }
 
+// This is a helper data structure for representing the
+// tree data in a manner that facilitates traversing
+// the tree.
 class treenode {
     public $id;
     public $meta;
@@ -354,6 +389,8 @@ class treenode {
     }
 }
 
+// converts tree (unordered set of triples)
+// to treenode (recursive)
 function tree_to_treenode(tree $t) {
     $root = new treenode(null, "/");
     $all = [null => $root];
@@ -371,6 +408,7 @@ function tree_to_treenode(tree $t) {
     return $root;
 }
 
+// print a treenode, recursively
 function print_treenode(treenode $tn, $depth=0) {
     $indent = str_pad("", $depth*2);
     printf("%s- %s\n", $indent, $tn->meta);
@@ -380,6 +418,7 @@ function print_treenode(treenode $tn, $depth=0) {
     }
 }
 
+// print a tree.  (by first converting to a treenode)
 function print_tree(tree $t) {
     $root = tree_to_treenode($t);
     print_treenode($root);
