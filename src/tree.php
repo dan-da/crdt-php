@@ -16,6 +16,9 @@
 // Presently, this file does not match the usage pattern of
 // the other crdt algo's in this directory.  This file is self
 // contained, and can be directly executed to run tests.
+//
+// As this is a quick/dirty experiment, no attempt is made at 
+// encapsulation.  All properties are public, etc.
 
 
 /*****************************************
