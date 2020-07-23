@@ -68,7 +68,9 @@ $ php tree.php Usage: tree.php <test>
 ```
 
 ```
-$ php tree.php test_concurrent_moves Initial tree state on both replicas
+$ php tree.php test_concurrent_moves
+
+Initial tree state on both replicas
 
 - /
 
