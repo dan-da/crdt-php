@@ -26,8 +26,24 @@ References:
 
 You will need PHP 7.0+ and [composer](https://getcomposer.org/).
 
+On Ubuntu:
+
 ```
-composer install crdt-php
+apt-get install php composer
+```
+
+To install as a standalone repo and run tests:
+
+```
+$ git clone https://github.com/dan-da/crdt-php && cd crdt-php
+$ composer install
+```
+
+To use as a library in your own project:
+
+```
+$ mkdir -p <project> && cd <project>
+$ composer require dan-da/crdt-php:dev-master
 ```
 
 ## Testing
