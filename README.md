@@ -73,9 +73,7 @@ $ php tree.php test_concurrent_moves
 Initial tree state on both replicas
 
 - /
-
   - root
-
     - a
     - b
     - c
@@ -83,24 +81,17 @@ Initial tree state on both replicas
 replica_1 tree after move
 
 - /
-
   - root
-
     - b
-
       - a
-
     - c
 
 replica_2 tree after move
 
 - /
-
   - root
-
     - b
     - c
-
       - a
 
 replica_1 state matches replica_2 state after each merges other's change. conflict resolved!
@@ -108,22 +99,16 @@ replica_1 state matches replica_2 state after each merges other's change. confli
 --replica_1 --
 
 - /
-
   - root
-
     - b
     - c
-
       - a
 
 --replica_2 --
 
 - /
-
   - root
-
     - b
     - c
-
       - a
 ```
