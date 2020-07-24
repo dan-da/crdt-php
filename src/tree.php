@@ -20,7 +20,6 @@
 // As this is a quick/dirty experiment, no attempt is made at 
 // encapsulation.  All properties are public, etc.
 
-
 /*****************************************
  * Begin Formal Algorithm
  *****************************************/
@@ -43,7 +42,7 @@
 // apply these operations using the algorithm described in the rest of
 // this section.
 class op_move {
-    public $timestamp;   // lamport 
+    public $timestamp;   // la_time (lamport clock + actor)
     public $parent_id;   // globally unique, eg uuid
     public $metadata;
     public $child_id;    // globally unique, eg uuid
@@ -73,7 +72,7 @@ class op_move {
 // such that (p', m', c') E tree, then oldp is set to Some(p', m').
 // The get_parent() function implements this.
 class log_op_move {
-    public $timestamp;   // lamport 
+    public $timestamp;   // la_time (lamport clock + actor)
     public $parent_id;   // globally unique, eg uuid
     public $metadata;
     public $child_id;    // globally unique, eg uuid
@@ -332,7 +331,7 @@ function apply_op(op_move $op1, state $state) {
     } else {
         $ops = $state->log_op_list;
         $logop = array_shift($ops);  // take from beginning of array
-        if($logop->timestamp > $op1->timestamp) {
+        if($logop->timestamp->gt($op1->timestamp)) {
             $tree2 = undo_op($logop, $state->tree);
             $undone_state = new state($ops, $tree2);
             $applied_state = apply_op($op1, $undone_state);
@@ -347,6 +346,65 @@ function apply_op(op_move $op1, state $state) {
 }
 
 /*****************************************
+ * la_time: A tuple of [lamport timestamp + actor]
+ *****************************************/
+
+class la_time {
+    public $actor_id;
+    public $counter;
+
+    function __construct($actor_id) {
+        $this->actor_id = $actor_id;
+        $this->counter = 0;
+    }
+
+    // returns a new la_time with same actor but counter incremented by 1.
+    function inc() {
+        $n = new la_time($this->actor_id);
+        $n->counter = $this->counter + 1;
+        return $n;
+    }
+
+    // returns a new la_time with same actor but counter is
+    // max(this_counter, other_counter)
+    function merge(la_time $other) {
+        $n = new la_time($this->actor_id);
+        $n->counter = max($this->counter, $other->counter);
+        return $n;
+    }
+
+    // compares this la_time with another.
+    // if counters are unequal, returns -1 or 1 accordingly.
+    // if counters are equal, returns -1, 0, or 1 based on actor_id.
+    //    (this is arbitrary, but deterministic.)
+    function compare(la_time $other) {
+        if($this->counter == $other->counter) {
+            if( $this->actor_id < $other->actor_id) {
+                return -1;
+            }
+            else if( $this->actor_id > $other->actor_id) {
+                return 1;
+            }
+            else {
+                return 0;
+            }
+        }
+        else if ($this->counter > $other->counter) {
+            return 1;
+        }
+        else if ($this->counter < $other->counter) {
+            return -1;
+        }
+    }
+
+    // returns true if this la_time is greater than other la_time.
+    function gt(la_time $other) {
+        return $this->compare($other) == 1;
+    }
+}
+
+
+/*****************************************
  * Helper Routines for Testing
  *****************************************/
 
@@ -356,7 +414,6 @@ function apply_ops(array $operations, state $prev_state = null) {
     $state = $prev_state ?: new state();
     foreach($operations as $op) {
         $state = apply_op($op, $state);
-        // var_dump($op, $state);
     }
     return $state;
 }
@@ -368,15 +425,6 @@ function apply_ops(array $operations, state $prev_state = null) {
 function new_id() {
     static $ids = 0;
     return $ids++;
-}
-
-// returns present timestamp.
-// fixme: should be replaced by lamport timestamp (or dotted vector clock?)
-//
-// using a global clock/counter like this is cheating.
-function timestamp() {
-    static $clock = 0;
-    return $clock++;
 }
 
 // This is a helper data structure for representing the
@@ -459,36 +507,60 @@ function print_replica_trees(state $repl1, state $repl2) {
 //
 // See paper for diagram.
 function test_concurrent_moves() {
+    $ts = false;
+
+    $clock1 = new la_time("r1");
+    $clock2 = new la_time("r2");
 
     // Setup initial tree state.
-    $ops = [new op_move(timestamp(), null, "root", $root_id = new_id()),
-            new op_move(timestamp(), $root_id, "a", $a_id = new_id()),
-            new op_move(timestamp(), $root_id, "b", $b_id = new_id()),
-            new op_move(timestamp(), $root_id, "c", $c_id = new_id()),
+    $ops = [new op_move($clock1 = $clock1->inc(), null, "root", $root_id = new_id()),
+            new op_move($clock2 = $clock2->inc(), $root_id, "a", $a_id = new_id()),
+            new op_move($clock1 = $clock1->inc(), $root_id, "b", $b_id = new_id()),
+            new op_move($clock1 = $clock1->inc(), $root_id, "c", $c_id = new_id()),
     ];
+    if( $ts ) {
+        $ops = [new op_move(timestamp(), null, "root", $root_id = new_id()),
+                new op_move(timestamp(), $root_id, "a", $a_id = new_id()),
+                new op_move(timestamp(), $root_id, "b", $b_id = new_id()),
+                new op_move(timestamp(), $root_id, "c", $c_id = new_id()),
+        ];
+    }
+
     $repl1_state = apply_ops($ops);
     $repl2_state = apply_ops($ops);
+
+    $clock1->merge($clock2);
+    $clock2->merge($clock1);
 
     echo "Initial tree state on both replicas\n";
     print_tree($repl1_state->tree);
 
     // replica_1 moves /root/a to /root/b
-    $repl1_ops = [new op_move(timestamp(), $b_id, "a", $a_id)];
+    $repl1_ops = [new op_move($clock1 = $clock1->inc(), $b_id, "a", $a_id)];
+    if( $ts ) {
+        $repl1_ops = [new op_move(timestamp(), $b_id, "a", $a_id)];
+    }
 
     // replica_2 "simultaneously" moves /root/a to /root/c
-    $repl2_ops = [new op_move(timestamp(), $c_id, "a", $a_id)];
+    $repl2_ops = [new op_move($clock2 = $clock2->inc(), $c_id, "a", $a_id)];
+    if( $ts ) {
+        $repl2_ops = [new op_move(timestamp(), $c_id, "a", $a_id)];
+    }
 
     // replica_1 applies his op, then merges op from replica_2
     $repl1_state = apply_ops($repl1_ops, $repl1_state);
+
     echo "\nreplica_1 tree after move\n";
     print_tree($repl1_state->tree);
     $repl1_state = apply_ops($repl2_ops, $repl1_state);
+    $clock1->merge($clock2);
 
     // replica_2 applies his op, then merges op from replica_1
     $repl2_state = apply_ops($repl2_ops, $repl2_state);
     echo "\nreplica_2 tree after move\n";
     print_tree($repl2_state->tree);
     $repl2_state = apply_ops($repl1_ops, $repl2_state);
+    $clock2->merge($clock1);
 
     // expected result: state is the same on both replicas
     // and final path is /root/c/a because last-writer-wins
@@ -523,34 +595,42 @@ function test_concurrent_moves() {
 // See paper for diagram.
 function test_concurrent_moves_cycle() {
 
-    $ops = [new op_move(timestamp(), null, "root", $root_id = new_id()),
-            new op_move(timestamp(), $root_id, "a", $a_id = new_id()),
-            new op_move(timestamp(), $root_id, "b", $b_id = new_id()),
-            new op_move(timestamp(), $a_id, "c", $c_id = new_id()),
+    $clock1 = new la_time("r1");
+    $clock2 = new la_time("r2");
+
+    $ops = [new op_move($clock1 = $clock1->inc(), null, "root", $root_id = new_id()),
+            new op_move($clock1 = $clock1->inc(), $root_id, "a", $a_id = new_id()),
+            new op_move($clock1 = $clock1->inc(), $root_id, "b", $b_id = new_id()),
+            new op_move($clock1 = $clock1->inc(), $a_id, "c", $c_id = new_id()),
     ];
     $repl1_state = apply_ops($ops);
     $repl2_state = apply_ops($ops);
+
+    $clock1->merge($clock2);
+    $clock2->merge($clock1);
 
     echo "Initial tree state on both replicas\n";
     print_tree($repl1_state->tree);
 
     // replica_1 moves /root/b to /root/a
-    $repl1_ops = [new op_move(timestamp(), $a_id, "b", $b_id)];
+    $repl1_ops = [new op_move($clock1 = $clock1->inc(), $a_id, "b", $b_id)];
 
     // replica_2 "simultaneously" moves /root/a to /root/b
-    $repl2_ops = [new op_move(timestamp(), $b_id, "a", $a_id)];
+    $repl2_ops = [new op_move($clock2 = $clock2->inc(), $b_id, "a", $a_id)];
 
     // replica_1 applies his op, then merges op from replica_2
     $repl1_state = apply_ops($repl1_ops, $repl1_state);
     echo "\nreplica_1 tree after move\n";
     print_tree($repl1_state->tree);
     $repl1_state = apply_ops($repl2_ops, $repl1_state);
+    $clock1->merge($clock2);
 
     // replica_2 applies his op, then merges op from replica_1
     $repl2_state = apply_ops($repl2_ops, $repl2_state);
     echo "\nreplica_2 tree after move\n";
     print_tree($repl2_state->tree);
     $repl2_state = apply_ops($repl1_ops, $repl2_state);
+    $clock2->merge($clock1);
 
     // expected result: state is the same on both replicas
     // and final path is /root/c/a because last-writer-wins
@@ -567,6 +647,76 @@ function test_concurrent_moves_cycle() {
     return;
 }
 
+
+// Tests case 2 in the paper.  Moving two moves concurrently without conflict.
+//
+// Initial State:
+// root
+//  - A
+//  - B
+//
+// Initially, nodes A and B are siblings.  Replica 1 moves A
+// to C, while concurrently replica 2 moves B to D.
+// Both of these operations should succeed because there is no
+// conflict, so the final state should be:
+//
+// root
+//  - C
+//  - D
+function test_concurrent_moves_no_conflict() {
+
+    $clock1 = new la_time("r1");
+    $clock2 = new la_time("r2");
+
+    $ops = [new op_move($clock1 = $clock1->inc(), null, "root", $root_id = new_id()),
+            new op_move($clock1 = $clock1->inc(), $root_id, "a", $a_id = new_id()),
+            new op_move($clock2 = $clock2->inc(), $root_id, "b", $b_id = new_id()),
+    ];
+    $repl1_state = apply_ops($ops);
+    $repl2_state = apply_ops($ops);
+
+    $clock1->merge($clock2);
+    $clock2->merge($clock1);
+
+    echo "Initial tree state on both replicas\n";
+    print_tree($repl1_state->tree);
+
+    // replica_1 moves /root/a to /root/c
+    $repl1_ops = [new op_move($clock1 = $clock1->inc(), $root_id, "c", $a_id)];
+
+    // replica_2 "simultaneously" moves /root/b to /root/d
+    $repl2_ops = [new op_move($clock2 = $clock2->inc(), $root_id, "d", $b_id)];
+
+    // replica_1 applies his op, then merges op from replica_2
+    $repl1_state = apply_ops($repl1_ops, $repl1_state);
+    echo "\nreplica_1 tree after move\n";
+    print_tree($repl1_state->tree);
+    $repl1_state = apply_ops($repl2_ops, $repl1_state);
+    $clock1->merge($clock2);
+  
+    // replica_2 applies his op, then merges op from replica_1
+    $repl2_state = apply_ops($repl2_ops, $repl2_state);
+    echo "\nreplica_2 tree after move\n";
+    print_tree($repl2_state->tree);
+    $repl2_state = apply_ops($repl1_ops, $repl2_state);
+    $clock2->merge($clock1);
+
+    // expected result: state is the same on both replicas
+    // and final path is /root/c/a because last-writer-wins
+    // and replica_2's op has a later timestamp.
+    if ($repl1_state->is_equal($repl2_state)) {
+        echo "\nreplica_1 state matches replica_2 state after each merges other's change.  conflict resolved!\n";
+        print_replica_trees($repl1_state, $repl2_state);
+    } else {
+        echo "\nwarning: replica_1 state does not match replica_2 state after merge\n  Check files in /tmp/repl{1,2}.json\n";
+        print_replica_trees($repl1_state, $repl2_state);
+        file_put_contents("/tmp/repl1.json", json_encode($repl1_state, JSON_PRETTY_PRINT));
+        file_put_contents("/tmp/repl2.json", json_encode($repl2_state, JSON_PRETTY_PRINT));
+    }
+    return;
+}
+
+
 // Tests that operations can be applied in any order
 // and result in the same final state.
 //
@@ -579,13 +729,16 @@ function test_concurrent_moves_cycle() {
 // It also calc and prints out some performance stats.
 function test_apply_ops_random_order() {
 
+    $clock1 = new la_time("r2");
+    $clock2 = new la_time("r1");
+
     // Generate initial tree state.
-    $ops = [new op_move(timestamp(), null, "root", $root_id = new_id()),
-            new op_move(timestamp(), null, "trash", $trash_id = new_id()),
-            new op_move(timestamp(), $root_id, "home", $home_id = new_id()),
-            new op_move(timestamp(), $home_id, "dilbert", $dilbert_id = new_id()),
-            new op_move(timestamp(), $home_id, "dogbert", $dogbert_id = $dilbert_id),
-            new op_move(timestamp(), $dogbert_id, "cycle_not_allowed", $home_id),
+    $ops = [new op_move($clock1 = $clock1->inc(), null, "root", $root_id = new_id()),
+            new op_move($clock1 = $clock1->inc(), null, "trash", $trash_id = new_id()),
+            new op_move($clock1 = $clock1->inc(), $root_id, "home", $home_id = new_id()),
+            new op_move($clock1 = $clock1->inc(), $home_id, "dilbert", $dilbert_id = new_id()),
+            new op_move($clock1 = $clock1->inc(), $home_id, "dogbert", $dogbert_id = $dilbert_id),
+            new op_move($clock1 = $clock1->inc(), $dogbert_id, "cycle_not_allowed", $home_id),
     ];
 
     $repl1_state = apply_ops($ops);
@@ -626,11 +779,6 @@ function test_apply_ops_random_order() {
 
     $tot_ops = $num_ops*$i;
     printf("\nops_per_apply: %s, applies: %s, total_ops: %s, duration: %.8f, secs_per_op: %.8f\n", $num_ops, $i, $tot_ops, $elapsed, $elapsed / $tot_ops);
-
-    global $redo_call_cnt;
-    global $undo_call_cnt;
-    printf("undo called %s times\n", $undo_call_cnt);
-    printf("redo called %s times\n", $redo_call_cnt);
 }
 
 /*****************************************
@@ -643,8 +791,14 @@ function main() {
         case 'test_concurrent_moves': test_concurrent_moves(); break;
         case 'test_concurrent_moves_cycle': test_concurrent_moves_cycle(); break;
         case 'test_apply_ops_random_order': test_apply_ops_random_order(); break;
-        default: print_help(); break;
+        case 'test_concurrent_moves_no_conflict': test_concurrent_moves_no_conflict(); break;
+        default: print_help(); exit;
     }
+
+    global $redo_call_cnt;
+    global $undo_call_cnt;
+    printf("undo called %s times\n", $undo_call_cnt);
+    printf("redo called %s times\n", $redo_call_cnt);
 }
 
 function print_help() {
@@ -654,6 +808,7 @@ Usage: tree.php <test>
 <test> can be any of:
   test_concurrent_moves
   test_concurrent_moves_cycle
+  test_concurrent_moves_no_conflict
   test_apply_ops_random_order
 
 END;
