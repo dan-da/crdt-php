@@ -54,7 +54,7 @@ class op_move {
         $this->child_id = $c;
     }
 
-    static function from_log_op_move(log_op_move $log) {
+    static function from_log_op_move(log_op_move $log): op_move {
         return new op_move($log->timestamp,
                            $log->parent_id,
                            $log->metadata,
@@ -86,7 +86,8 @@ class log_op_move {
         $this->oldp = $oldp;
     }
 
-    function is_equal(log_op_move $other) {
+    // for testing. not part of crdt-tree algo.
+    function is_equal(log_op_move $other): bool {
         return $this == $other;
     }
 }
@@ -118,7 +119,8 @@ class state {
         array_unshift($this->log_op_list, $entry);
     }
 
-    function is_equal(state $other) {
+    // for testing. not part of crdt-tree algo.
+    function is_equal(state $other): bool {
         return $this->log_op_list == $other->log_op_list &&
                $this->tree->is_equal($other->tree);
     }
@@ -134,6 +136,11 @@ class tree_node {
     function __construct($parent_id, $meta) {
         $this->parent_id = $parent_id;
         $this->meta = $meta;
+    }
+
+    function is_equal(tree_node $other) {
+        return $this->parent_id === $other->parent_id &&
+               $this->meta === $other->meta;
     }
 
 }
@@ -156,24 +163,27 @@ class tree {
         }
     }
 
+    // adds a node to the tree
     function add_node($child_id, tree_node $tt) {
         $this->triples[$child_id] = $tt;
         $this->children[$tt->parent_id][$child_id] = true;
     }
 
-    // returns 
+    // returns matching node, or null.
     function find($child_id): ?tree_node {
         return @$this->triples[$child_id];
     }
 
-    // only used for tests, not for crdt algo.
-    // this is inefficient because each node does not know its children.
-    // idea: store child_ids in metadata.
-    function children($parent_id) {
+    // returns children (IDs) of a given parent node.
+    // useful for walking tree.
+    // not used by crdt algo.
+    function children($parent_id): ?array {
         $list = @$this->children[$parent_id];
         return $list ? array_keys($list) : [];
     }
 
+    // walks tree and calls callback fn for each node.
+    // not used by crdt algo.
     function walk($parent_id, $callback) {
         $callback($parent_id);
         $children = $this->children($parent_id);
@@ -183,20 +193,22 @@ class tree {
     }
 
     // test for equality between two trees.
-    // only used for tests, not for crdt algo.
+    // not used by crdt algo.
     function is_equal(tree $other): bool {
         // We must treat the triples array as an unordered set
         // (where the two sets are equal even if values are present
         // in a different order).
         // Therefore, we cannot simply check if array_values()
         // for each set is equal.
-        foreach($this->triples as $t) {
-            if(!in_array($t, $other->triples)) {
+        foreach($this->triples as $k => $t) {
+            $o = @$other->triples[$k];
+            if(!$o || !$t->is_equal($o)){
                 return false;
             }
         }
-        foreach($other->triples as $t) {
-            if(!in_array($t, $this->triples)) {
+        foreach($other->triples as $k => $t) {
+            $o = @$this->triples[$k];
+            if(!$o || !$t->is_equal($o)){
                 return false;
             }
         }
@@ -230,7 +242,7 @@ function get_parent(tree $tree, $child_id):? tree_node {
 
 // determines if ancestor_id is an ancestor of node_id in tree.
 // returns bool
-function is_ancestor($tree, $child_id, $ancestor_id) {
+function is_ancestor($tree, $child_id, $ancestor_id): bool {
     $target_id = $child_id;
     while($n = $tree->find($target_id)) {
         if($n->parent_id == $ancestor_id) {
@@ -248,7 +260,7 @@ function is_ancestor($tree, $child_id, $ancestor_id) {
 // Move operation and the current tree and it returns a pair
 // consisting of a LogMove operation (which will be added to the log) and
 // an updated tree.
-function do_op(op_move $op, tree $t) {
+function do_op(op_move $op, tree $t): array {
 
     // When a replica applies a Move op to its tree, it also records
     // a corresponding LogMove op in its log.  The t, p, m, and c
@@ -305,7 +317,7 @@ $undo_call_cnt = 0;  // for gathering stats, not part of algo.
 // undo_op inverts the effect of a previous move operation
 // by restoring the prior parent and metadata that were
 // recorded in the LogMove's additional field.
-function undo_op(log_op_move $log, tree $t) {
+function undo_op(log_op_move $log, tree $t): tree {
     $GLOBALS['undo_call_cnt'] ++;  // for stats, not part of algo    
 
     if(is_null($log->oldp)) {
@@ -325,7 +337,7 @@ $redo_call_cnt = 0;  // for gathering stats, not part of algo.
 // redo_op uses do_op to perform an operation
 // again and recomputes the LogMove record (which
 // might have changed due to the effect of the new operation)
-function redo_op(log_op_move $log, state $state) {
+function redo_op(log_op_move $log, state $state): state {
     $GLOBALS['redo_call_cnt'] ++;  // for stats, not part of algo    
 
     $op = op_move::from_log_op_move($log);
@@ -344,7 +356,7 @@ function redo_op(log_op_move $log, state $state) {
 // indicates that timestamps `t are instance if linorder
 // type class, and they can therefore be compared with the
 // < operator during a linear (or total) order.
-function apply_op(op_move $op1, state $state) {
+function apply_op(op_move $op1, state $state): state {
     if(count($state->log_op_list) == 0) {
         list($op2, $tree2) = do_op($op1, $state->tree);
         return new state([$op2], $tree2);
@@ -468,57 +480,27 @@ class global_time implements clock_interface {
 // replicas.
 //
 // In practice, this would be some type of UUID
-function new_id() {
+function new_id(): int {
     static $ids = 0;
     return $ids++;
 }
 
-// This is a helper data structure for representing the
-// tree data in a manner that facilitates traversing
-// the tree.
-class treenode {
-    public $id;
-    public $meta;
-    public $children = [];
-    function __construct($id, $meta) {
-        $this->id = $id;
-        $this->meta = $meta;
-    }
-}
-
-// converts tree (unordered set of triples)
-// to treenode (recursive)
-function tree_to_treenode(tree $t) {
-    $root = new treenode(null, "/");
-    $all = [null => $root];
-
-    foreach($t->triples as $child_id => $tt) {
-        $n = new treenode($child_id, $tt->meta);
-        $all[$n->id] = $n;
-    }
-
-    foreach($t->triples as $child_id => $tt) {
-        $parent = &$all[$tt->parent_id];
-        $n = &$all[$child_id];
-        $parent->children[] = $n;
-    }
-    return $root;
-}
-
 // print a treenode, recursively
-function print_treenode(treenode $tn, $depth=0) {
+function print_treenode(tree $tree, $node_id, $depth=0) {
+    $tn = $tree->find($node_id);
+    
     $indent = str_pad("", $depth*2);
-    printf("%s- %s\n", $indent, $tn->meta);
+    printf("%s- %s\n", $indent, $node_id === null ? '/' : $tn->meta);
 
-    foreach($tn->children as $c) {
-        print_treenode($c, $depth+1);
+    foreach($tree->children($node_id) as $c) {
+        print_treenode($tree, $c, $depth+1);
     }
 }
 
 // print a tree.  (by first converting to a treenode)
 function print_tree(tree $t) {
-    $root = tree_to_treenode($t);
-    print_treenode($root);
+    // $root = tree_to_treenode($t);
+    print_treenode($t, null);
 }
 
 // Test helper routine
@@ -888,15 +870,12 @@ function test_add_nodes() {
 function test_move_node_deep_tree() {
 
     $r1 = new replica();
-    $r2 = new replica();
 
     // Generate initial tree state.
     $ops = [new op_move($r1->tick(), null, "root", $root_id = new_id())];
     mktree_ops($ops, $r1, $root_id, 2, 12);
 
     $r1->apply_ops($ops);
-    $r2->apply_ops($ops);
-
 
     $children = $r1->state->tree->children($root_id);
     list($child_id_a, $meta_a) = $children[0];
@@ -907,15 +886,17 @@ function test_move_node_deep_tree() {
     $start = microtime(true);
 
     // move /a underneath /b.
-    $ops = [new op_move($r1->tick(), $child_id_b, "moved", $child_id_a)];
+    $ops2 = [new op_move($r1->tick(), $child_id_b, "moved", $child_id_a)];
 
-    $r1->apply_ops($ops);
-    print_tree($r1->state->tree);
+    $r1->apply_ops($ops2);
     
     $end = microtime(true);
     $elapsed = $end - $start;
-    
-    printf("\ntotal_ops: %s, duration: %.8f, secs_per_op: %.8f\n", count($ops), $elapsed, $elapsed / count($ops));
+
+    print_tree($r1->state->tree);   
+
+    printf("\nbuild_ops (tree size): %s\n", count($ops));
+    printf("\ndeep_move_ops: %s, duration: %.8f, secs_per_op: %.8f\n", count($ops2), $elapsed, $elapsed / count($ops2));
 }
 
 function test_walk_deep_tree() {
@@ -923,21 +904,30 @@ function test_walk_deep_tree() {
     $r1 = new replica();
 
     // Generate initial tree state.
+    echo "generating ops...\n";
     $ops = [new op_move($r1->tick(), null, "root", $root_id = new_id())];
     mktree_ops($ops, $r1, $root_id, 2, 13);
 
-    $r1->apply_ops($ops);
+    echo "applying ops...\n";
+    $start_apply = microtime(true);
 
+    $r1->apply_ops($ops);
+    
+    $end_apply = microtime(true);
+    $elapsed_apply = $end_apply - $start_apply;
+
+    echo "walking tree...\n";
     $start = microtime(true);
 
     $cb = function($node_id) {};
-
     $r1->state->tree->walk($root_id, $cb);
 
     $end = microtime(true);
     $elapsed = $end - $start;
     
-    printf("\nnodes in tree: %s, tree walk duration: %.8f, per node: %.8f\n", count($ops), $elapsed, $elapsed / count($ops));
+    printf("\nnodes in tree: %s\n", count($ops));
+    printf("\napply duration: %.8f, per node: %.8f\n", $elapsed_apply, $elapsed_apply / count($ops));
+    printf("\ntree walk duration: %.8f, per node: %.8f\n", $elapsed, $elapsed / count($ops));
 }
 
 
@@ -960,7 +950,7 @@ function main() {
 
     global $redo_call_cnt;
     global $undo_call_cnt;
-    printf("undo called %s times\n", $undo_call_cnt);
+    printf("\nundo called %s times\n", $undo_call_cnt);
     printf("redo called %s times\n", $redo_call_cnt);
 }
 
