@@ -110,11 +110,6 @@ class state {
     }
 
     function add_log_entry(log_op_move $entry) {
-        // optimization: avoid sequential duplicates.
-        if($entry == @$this->log_op_list[0]) {
-            return;
-        }
-
         // add at beginning of array
         array_unshift($this->log_op_list, $entry);
     }
@@ -123,6 +118,22 @@ class state {
     function is_equal(state $other): bool {
         return $this->log_op_list == $other->log_op_list &&
                $this->tree->is_equal($other->tree);
+    }
+
+    // for testing. not part of crdt-tree algo.
+    function check_log_is_descending() {
+        $i = 0;
+        for($i = 0; $i < count($this->log_op_list)-1; $i ++) {
+            $first = $this->log_op_list[$i];
+            $second = $this->log_op_list[$i+1];
+
+            if( !$first->timestamp->gt($second->timestamp) ) {
+                print_r($first);
+                print_r($second);
+                throw new Exception("Log not in descending timestamp order!");
+            }
+        }
+        return true;
     }
 }
 
@@ -337,12 +348,12 @@ $redo_call_cnt = 0;  // for gathering stats, not part of algo.
 // redo_op uses do_op to perform an operation
 // again and recomputes the LogMove record (which
 // might have changed due to the effect of the new operation)
-function redo_op(log_op_move $log, state $state): state {
+function redo_op(log_op_move $logop, state $state): state {
     $GLOBALS['redo_call_cnt'] ++;  // for stats, not part of algo    
 
-    $op = op_move::from_log_op_move($log);
-    list($log2, $tree2) = do_op($op, $state->tree);
-    $state->add_log_entry($log2);
+    $op = op_move::from_log_op_move($logop);
+    list($logop2, $tree2) = do_op($op, $state->tree);
+    $state->add_log_entry($logop2);
     $state->tree = $tree2;
     return $state;
 }
@@ -363,11 +374,22 @@ function apply_op(op_move $op1, state $state): state {
     } else {
         $ops = $state->log_op_list;
         $logop = array_shift($ops);  // take from beginning of array
-        if($logop->timestamp->gt($op1->timestamp)) {
+        if($op1->timestamp->eq($logop->timestamp)) {
+            // This case should never happen in normal operation
+            // because it is required that all timestamps are unique.
+            // The crdt paper does not even check for this case.
+            //
+            // We throw an exception to catch it during dev/test.
+            throw new Exception("applying op with timestamp equal to previous op.  Every op should have a unique timestamp.");
+
+            // Or production code could just treat it as a non-op.
+            return $state;
+        } else if($op1->timestamp->lt($logop->timestamp)) {
             $tree2 = undo_op($logop, $state->tree);
             $undone_state = new state($ops, $tree2);
             $applied_state = apply_op($op1, $undone_state);
-            return redo_op($logop, $applied_state);
+            $d = redo_op($logop, $applied_state);
+            return $d;
         } else {
             list($op2, $tree2) = do_op($op1, $state->tree);
             $state->add_log_entry($op2);
@@ -388,6 +410,8 @@ interface clock_interface {
     function inc();
     function merge(clock_interface $other);
     function gt(clock_interface $other);
+    function lt(clock_interface $other);
+    function eq(clock_interface $other);
 }
 
 // implements lamport timestamp + actor tuple.
@@ -443,6 +467,14 @@ class la_time implements clock_interface {
     function gt(clock_interface $other) {
         return $this->compare($other) == 1;
     }
+
+    function lt(clock_interface $other) {
+        return $this->compare($other) == -1;
+    }
+
+    function eq(clock_interface $other) {
+        return $this->compare($other) === 0;
+    }
 }
 
 // This clock just uses a global (shared state) counter.
@@ -468,6 +500,14 @@ class global_time implements clock_interface {
 
     function gt(clock_interface $other) {
         return $this->count > $other->count;
+    }
+
+    function lt(clock_interface $other) {
+        return $this->count < $other->count;
+    }
+
+    function eq(clock_interface $other) {
+        return $this->count === $other->count;
     }
 }
 
@@ -640,6 +680,7 @@ function test_concurrent_moves() {
         file_put_contents("/tmp/repl1.json", json_encode($r1, JSON_PRETTY_PRINT));
         file_put_contents("/tmp/repl2.json", json_encode($r2, JSON_PRETTY_PRINT));
     }
+    $r1->state->check_log_is_descending();
     return;
 }
 
@@ -707,6 +748,7 @@ function test_concurrent_moves_cycle() {
         file_put_contents("/tmp/repl1.json", json_encode($r1, JSON_PRETTY_PRINT));
         file_put_contents("/tmp/repl2.json", json_encode($r2, JSON_PRETTY_PRINT));
     }
+    $r1->state->check_log_is_descending();
     return;
 }
 
@@ -773,6 +815,7 @@ function test_concurrent_moves_no_conflict() {
         file_put_contents("/tmp/repl1.json", json_encode($r1, JSON_PRETTY_PRINT));
         file_put_contents("/tmp/repl2.json", json_encode($r2, JSON_PRETTY_PRINT));
     }
+    $r1->state->check_log_is_descending();
     return;
 }
 
@@ -801,25 +844,27 @@ function test_apply_ops_random_order() {
     ];
 
     $r1->apply_ops($ops);
+    $r1->state->check_log_is_descending();
 
     $start = microtime(true);
     $num_ops = count($ops);
 
-    printf("Performing move operations...\n");
+    printf("Applying move operations from replica1 to replica2 in random orders...\n");
     $all_equal = true;
 
     for($i = 0; $i < 100000; $i ++) {
         $ops2 = $ops;
         shuffle($ops2);
-        // $r2 = new replica();
+
+        $r2 = new replica();
         $r2->apply_ops($ops2);
 
         if($i % 10000 == 0) {
             printf("$i... ");
-//            printf("logs: %s\n", count($r2->state->log_op_list));
         }
+        $r2->state->check_log_is_descending();
 
-        if (!$r1->state->tree->is_equal($r2->state->tree)) {
+        if (!$r1->state->is_equal($r2->state)) {
             file_put_contents("/tmp/repl1.json", json_encode($r1, JSON_PRETTY_PRINT));
             file_put_contents("/tmp/repl2.json", json_encode($r2, JSON_PRETTY_PRINT));
             file_put_contents("/tmp/ops1.json", json_encode($ops, JSON_PRETTY_PRINT));
@@ -833,7 +878,7 @@ function test_apply_ops_random_order() {
     $elapsed = $end - $start;
     
     if($all_equal) {
-        echo "\n\nAll states were consistent after each apply.  :-)\n";
+        echo "\n\nStates were consistent and log timestamps descending after each apply.  :-)\n";
     } else {
         echo "\n\nFound an inconsistent state.  Check /tmp/ops{1,2}.json and /tmp/repl{1,2}.json.\n";
     }
@@ -845,21 +890,15 @@ function test_apply_ops_random_order() {
 function test_add_nodes() {
 
     $r1 = new replica();
-    $r2 = new replica();
 
     // Generate initial tree state.
-    $ops = [new op_move($r1->tick(), null, "root", $root_id = new_id()),
-    ];
-
-    $r1->apply_ops($ops);
-    $r2->apply_ops($ops);
+    $ops = [new op_move($r1->tick(), null, "root", $root_id = new_id())];
+    mktree_ops($ops, $r1, $root_id);
 
     $start = microtime(true);
 
-    mktree_ops($ops, $r1, $root_id);
-
     $r1->apply_ops($ops);
-    print_tree($r1->state->tree);
+    // print_tree($r1->state->tree);
     
     $end = microtime(true);
     $elapsed = $end - $start;
@@ -891,7 +930,7 @@ function test_move_node_deep_tree() {
     $end = microtime(true);
     $elapsed = $end - $start;
 
-    print_tree($r1->state->tree);   
+    // print_tree($r1->state->tree);   
 
     printf("\nbuild_ops (tree size): %s\n", count($ops));
     printf("\ndeep_move_ops: %s, duration: %.8f, secs_per_op: %.8f\n", count($ops2), $elapsed, $elapsed / count($ops2));
