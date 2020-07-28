@@ -881,8 +881,6 @@ function test_move_node_deep_tree() {
     list($child_id_a, $meta_a) = $children[0];
     list($child_id_b, $meta_b) = $children[1];
 
-//    var_dump($children); exit;
-
     $start = microtime(true);
 
     // move /a underneath /b.
