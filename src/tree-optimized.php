@@ -135,6 +135,7 @@ class tree_node {
         $this->parent_id = $parent_id;
         $this->meta = $meta;
     }
+
 }
 
 // Represents a tree as a set (unordered list)
@@ -144,14 +145,20 @@ class tree_node {
 //   ('n x 'm x 'n)
 class tree {
     public $triples = [];
+    public $children = [];  // parent_id => [child_id => true].  optimization.
 
     // helper for removing a triple based on child_id
     function rm_child($child_id) {
-        unset($this->triples[$child_id]);
+        $t = @$this->triples[$child_id];
+        if($t) {
+            unset($this->children[$t->parent_id][$child_id]);
+            unset($this->triples[$child_id]);
+        }
     }
 
     function add_node($child_id, tree_node $tt) {
         $this->triples[$child_id] = $tt;
+        $this->children[$tt->parent_id][$child_id] = true;
     }
 
     // returns 
@@ -163,13 +170,16 @@ class tree {
     // this is inefficient because each node does not know its children.
     // idea: store child_ids in metadata.
     function children($parent_id) {
-        $list = [];
-        foreach($this->triples as $child_id => $tr) {
-            if($tr->parent_id === $parent_id) {
-                $list[] = [$child_id, $tr->meta];
-            }
+        $list = @$this->children[$parent_id];
+        return $list ? array_keys($list) : [];
+    }
+
+    function walk($parent_id, $callback) {
+        $callback($parent_id);
+        $children = $this->children($parent_id);
+        foreach($children as $c) {
+            $this->walk($c, $callback);
         }
-        return $list;
     }
 
     // test for equality between two trees.
@@ -566,7 +576,7 @@ class replica {
 // Returns operations representing a depth-first tree, 
 // with 2 children for each parent.
 function mktree_ops(array &$ops, replica $r, $parent_id, $depth=2, $max_depth=12) {
-    if($depth >= $max_depth) {
+    if($depth > $max_depth) {
         return;
     }
     for($i=0; $i < 2; $i++) {
@@ -908,6 +918,28 @@ function test_move_node_deep_tree() {
     printf("\ntotal_ops: %s, duration: %.8f, secs_per_op: %.8f\n", count($ops), $elapsed, $elapsed / count($ops));
 }
 
+function test_walk_deep_tree() {
+
+    $r1 = new replica();
+
+    // Generate initial tree state.
+    $ops = [new op_move($r1->tick(), null, "root", $root_id = new_id())];
+    mktree_ops($ops, $r1, $root_id, 2, 13);
+
+    $r1->apply_ops($ops);
+
+    $start = microtime(true);
+
+    $cb = function($node_id) {};
+
+    $r1->state->tree->walk($root_id, $cb);
+
+    $end = microtime(true);
+    $elapsed = $end - $start;
+    
+    printf("\nnodes in tree: %s, tree walk duration: %.8f, per node: %.8f\n", count($ops), $elapsed, $elapsed / count($ops));
+}
+
 
 /*****************************************
  * Main.   Let's run some tests.
@@ -922,6 +954,7 @@ function main() {
         case 'test_concurrent_moves_no_conflict': test_concurrent_moves_no_conflict(); break;
         case 'test_add_nodes'; test_add_nodes(); break;
         case 'test_move_node_deep_tree': test_move_node_deep_tree(); break;
+        case 'test_walk_deep_tree': test_walk_deep_tree(); break;
         default: print_help(); exit;
     }
 
@@ -943,6 +976,7 @@ Usage: tree.php <test>
   test_apply_ops_random_order
   test_add_nodes
   test_move_node_deep_tree
+  test_walk_deep_tree
 
 
 END;

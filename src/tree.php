@@ -165,6 +165,15 @@ class tree {
         return $list;
     }
 
+    function walk($parent_id, $callback) {
+        $callback($parent_id);
+        $children = $this->children($parent_id);
+        foreach($children as $c) {
+            list($child_id, $meta) = $c;
+            $this->walk($child_id, $callback);
+        }
+    }   
+
     // test for equality between two trees.
     function is_equal(tree $other) {
         // We must treat the triples array as an unordered set
@@ -910,6 +919,28 @@ function test_move_node_deep_tree() {
     printf("\ntotal_ops: %s, duration: %.8f, secs_per_op: %.8f\n", count($ops), $elapsed, $elapsed / count($ops));
 }
 
+function test_walk_deep_tree() {
+
+    $r1 = new replica();
+
+    // Generate initial tree state.
+    $ops = [new op_move($r1->tick(), null, "root", $root_id = new_id())];
+    mktree_ops($ops, $r1, $root_id, 2, 13);
+
+    $r1->apply_ops($ops);
+
+    $start = microtime(true);
+
+    $cb = function($node_id) {};
+
+    $r1->state->tree->walk($root_id, $cb);
+
+    $end = microtime(true);
+    $elapsed = $end - $start;
+    
+    printf("\nnodes in tree: %s, tree walk duration: %.8f, per node: %.8f\n", count($ops), $elapsed, $elapsed / count($ops));
+}
+
 
 /*****************************************
  * Main.   Let's run some tests.
@@ -924,6 +955,7 @@ function main() {
         case 'test_concurrent_moves_no_conflict': test_concurrent_moves_no_conflict(); break;
         case 'test_add_nodes'; test_add_nodes(); break;
         case 'test_move_node_deep_tree': test_move_node_deep_tree(); break;
+        case 'test_walk_deep_tree': test_walk_deep_tree(); break;
         default: print_help(); exit;
     }
 
@@ -945,6 +977,7 @@ Usage: tree.php <test>
   test_apply_ops_random_order
   test_add_nodes
   test_move_node_deep_tree
+  test_walk_deep_tree
 
 
 END;
