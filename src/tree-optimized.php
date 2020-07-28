@@ -76,7 +76,7 @@ class log_op_move {
     public $parent_id;   // globally unique, eg uuid
     public $metadata;
     public $child_id;    // globally unique, eg uuid
-    public $oldp;        // None/null or [node_id,meta]
+    public $oldp;        // None/null or tree_node
 
     function __construct(op_move $op, $oldp = null) {
         $this->timestamp = $op->timestamp;
@@ -126,15 +126,14 @@ class state {
 
 // Represents a parent, meta, child triple
 // that is stored in an unordered set in a tree 
-class tree_triple {
+class tree_node {
     public $parent_id;
     public $meta;
-    public $child_id;
+    // note: child_id is stored only as a map key in tree.
 
-    function __construct($parent_id, $meta, $child_id) {
+    function __construct($parent_id, $meta) {
         $this->parent_id = $parent_id;
         $this->meta = $meta;
-        $this->child_id = $child_id;
     }
 }
 
@@ -148,25 +147,34 @@ class tree {
 
     // helper for removing a triple based on child_id
     function rm_child($child_id) {
-        foreach($this->triples as $idx => $tr) {
-            if($tr->child_id == $child_id) {
-                unset($this->triples[$idx]);
-            }
-        }
+        unset($this->triples[$child_id]);
     }
 
+    function add_node($child_id, tree_node $tt) {
+        $this->triples[$child_id] = $tt;
+    }
+
+    // returns 
+    function find($child_id): ?tree_node {
+        return @$this->triples[$child_id];
+    }
+
+    // only used for tests, not for crdt algo.
+    // this is inefficient because each node does not know its children.
+    // idea: store child_ids in metadata.
     function children($parent_id) {
         $list = [];
-        foreach($this->triples as $idx => $tr) {
+        foreach($this->triples as $child_id => $tr) {
             if($tr->parent_id === $parent_id) {
-                $list[] = [$tr->child_id, $tr->meta];
+                $list[] = [$child_id, $tr->meta];
             }
         }
         return $list;
     }
 
     // test for equality between two trees.
-    function is_equal(tree $other) {
+    // only used for tests, not for crdt algo.
+    function is_equal(tree $other): bool {
         // We must treat the triples array as an unordered set
         // (where the two sets are equal even if values are present
         // in a different order).
@@ -190,14 +198,8 @@ class tree {
 
 // finds parent of a given child node in a tree.
 // returns [parent_id, meta]
-function get_parent(tree $tree, $node_id) {
-
-    foreach($tree->triples as $tr) {
-        if($tr->child_id == $node_id) {
-            return [$tr->parent_id, $tr->meta];
-        }
-    }
-    return null;
+function get_parent(tree $tree, $child_id):? tree_node {
+    return @$tree->find($child_id);
 }
 
 // parent | child
@@ -218,22 +220,13 @@ function get_parent(tree $tree, $node_id) {
 
 // determines if ancestor_id is an ancestor of node_id in tree.
 // returns bool
-function is_ancestor($tree, $node_id, $ancestor_id) {
-    $ancestors = [];
-
-    foreach( array_reverse($tree->triples) as $triple ) {
-        if( $triple->child_id == $node_id ) {
-            $ancestors[] = $triple->parent_id;
-        }
-        else if(in_array($triple->child_id, $ancestors)) {
-            $ancestors[] = $triple->parent_id;
-        }
-        else {
-            continue;
-        }
-        if ($ancestor_id == $triple->parent_id) {
+function is_ancestor($tree, $child_id, $ancestor_id) {
+    $target_id = $child_id;
+    while($n = $tree->find($target_id)) {
+        if($n->parent_id == $ancestor_id) {
             return true;
         }
+        $target_id = $n->parent_id;
     }
     return false;
 }
@@ -271,8 +264,8 @@ function do_op(op_move $op, tree $t) {
     // its existing parent, if any, and adding the new
     // parent-child relationship (newp, m, c) to the tree.
     $t->rm_child($op->child_id);
-    $tt = new tree_triple($op->parent_id, $op->metadata, $op->child_id);
-    $t->triples[] = $tt;
+    $tt = new tree_node($op->parent_id, $op->metadata);
+    $t->add_node($op->child_id, $tt);
 //    echo "tree changed!\n";
     return [$log, $t];
 }
@@ -310,8 +303,8 @@ function undo_op(log_op_move $log, tree $t) {
     } else {
         $t->rm_child($log->child_id);
 
-        list($oldp, $oldm) = $log->oldp;
-        $t->triples[] = new tree_triple($oldp, $oldm, $log->child_id);
+        $oldp = $log->oldp;
+        $t->add_node($log->child_id, new tree_node($oldp->parent_id, $oldp->meta));
     }
 
     return $t;
@@ -489,14 +482,14 @@ function tree_to_treenode(tree $t) {
     $root = new treenode(null, "/");
     $all = [null => $root];
 
-    foreach($t->triples as $tt) {
-        $n = new treenode($tt->child_id, $tt->meta);
+    foreach($t->triples as $child_id => $tt) {
+        $n = new treenode($child_id, $tt->meta);
         $all[$n->id] = $n;
     }
 
-    foreach($t->triples as $tt) {
+    foreach($t->triples as $child_id => $tt) {
         $parent = &$all[$tt->parent_id];
-        $n = &$all[$tt->child_id];
+        $n = &$all[$child_id];
         $parent->children[] = $n;
     }
     return $root;
@@ -573,7 +566,7 @@ class replica {
 // Returns operations representing a depth-first tree, 
 // with 2 children for each parent.
 function mktree_ops(array &$ops, replica $r, $parent_id, $depth=2, $max_depth=12) {
-    if($depth > $max_depth) {
+    if($depth >= $max_depth) {
         return;
     }
     for($i=0; $i < 2; $i++) {
@@ -582,6 +575,7 @@ function mktree_ops(array &$ops, replica $r, $parent_id, $depth=2, $max_depth=12
         mktree_ops($ops, $r, $child_id, $depth+1, $max_depth);
     }
 }
+
 
 /*****************************************
  * Test Routines
@@ -633,13 +627,14 @@ function test_concurrent_moves() {
 
     echo "\nreplica_1 tree after move\n";
     print_tree($r1->state->tree);
-    $r1->apply_ops($repl2_ops, $r2->time);
+    $r1->apply_ops($repl2_ops);
+    print_tree($r1->state->tree);
 
     // replica_2 applies his op, then merges op from replica_1
     $r2->apply_ops($repl2_ops);
     echo "\nreplica_2 tree after move\n";
     print_tree($r2->state->tree);
-    $r2->apply_ops($repl1_ops, $r1->time);
+    $r2->apply_ops($repl1_ops);
 
     // expected result: state is the same on both replicas
     // and final path is /root/c/a because last-writer-wins
@@ -892,9 +887,12 @@ function test_move_node_deep_tree() {
     $r1->apply_ops($ops);
     $r2->apply_ops($ops);
 
+
     $children = $r1->state->tree->children($root_id);
     list($child_id_a, $meta_a) = $children[0];
     list($child_id_b, $meta_b) = $children[1];
+
+//    var_dump($children); exit;
 
     $start = microtime(true);
 
@@ -951,3 +949,13 @@ END;
 }
 
 main();
+
+
+
+// Issue: there is presently no fast way to list children of given node.
+// Ideas:
+//   1. List child nodes in parent node.  (faster for reads)
+//   2. Maintain an index in tree of node_id => [child_id]
+//   3. include child_ids in node's metadata  (redundant data in log)
+//
+//   child list/index must be modified when any child is added or removed.
