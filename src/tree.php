@@ -114,6 +114,22 @@ class state {
         array_unshift($this->log_op_list, $entry);
     }
 
+    // removes log entries before a given timestamp.
+    // not part of crdt-tree algo.
+    function truncate_log_before(clock_interface $timestamp): bool {
+        $a = &$this->log_op_list;
+        $truncated = false;
+
+        foreach($this->log_op_list as $key => $v) {
+            if($v->timestamp->lt($timestamp)) {
+                unset($this->log_op_list[$key]);
+                $truncated = true;
+            }
+        }
+
+        return $truncated;
+    }
+
     // for testing. not part of crdt-tree algo.
     function is_equal(state $other): bool {
         return $this->log_op_list == $other->log_op_list &&
@@ -128,8 +144,6 @@ class state {
             $second = $this->log_op_list[$i+1];
 
             if( !$first->timestamp->gt($second->timestamp) ) {
-                print_r($first);
-                print_r($second);
                 throw new Exception("Log not in descending timestamp order!");
             }
         }
@@ -408,6 +422,7 @@ function apply_op(op_move $op1, state $state): state {
 interface clock_interface {
     function __construct($actor_id);
     function inc();
+    function actor_id();
     function merge(clock_interface $other);
     function gt(clock_interface $other);
     function lt(clock_interface $other);
@@ -429,6 +444,10 @@ class la_time implements clock_interface {
         $n = new la_time($this->actor_id);
         $n->counter = $this->counter + 1;
         return $n;
+    }
+
+    function actor_id() {
+        return $this->actor_id;
     }
 
     // returns a new la_time with same actor but counter is
@@ -481,15 +500,21 @@ class la_time implements clock_interface {
 // It is useful only for simulations.
 class global_time implements clock_interface {
     private static $global_counter = 0;
+    private $actor_id;
     public $count;
 
     function __construct($actor_id) {
         self::$global_counter ++;
         $this->count = self::$global_counter;
+        $this->actor_id = $actor_id;
     }
 
     function inc() {
         return new global_time(null);
+    }
+
+    function actor_id() {
+        return $this->actor_id;
     }
 
     function merge(clock_interface $other) {
@@ -557,6 +582,9 @@ class replica {
     public $state;   // state
     public $time;    // must implement clock_interface
 
+    public $replica_list = [];  // list of replica IDs.
+    public $latest_time_by_replica = []; 
+
     static private $clock_type = "la_time";   // la_time | global_time
 
     function __construct($id = null) {
@@ -572,6 +600,13 @@ class replica {
         }
     }
 
+    // set array of replica IDs.
+    function set_replica_list(array $replicas) {
+        foreach($replicas as $id) {
+            $this->replica_list[$id] = true;
+        }
+    }
+
     function apply_ops(array $ops, $debug = false) {
         foreach($ops as $op) {
             if($debug) {
@@ -583,9 +618,44 @@ class replica {
                 echo "==========================\n";
             } else 
             $this->state = apply_op($op, $this->state);
-
             $this->time->merge($op->timestamp);
+
+            $id = $op->timestamp->actor_id();
+            if( @$this->replica_list[$id] ) {
+                $latest = @$this->latest_time_by_replica[$id];
+                if(!$latest || $op->timestamp->gt($latest)) {
+                    $this->latest_time_by_replica[$id] = $op->timestamp;
+                }
+            }
         }
+    }
+
+    function causally_stable_threshold(): ?clock_interface {
+        // Check that we have a known latest timestamp for each
+        // known replica.   If not, there is no causally stable threshold.
+        $cnt_known_replicas = count($this->replica_list);
+        $cnt_known_times = count($this->latest_time_by_replica);
+        if($cnt_known_replicas != $cnt_known_times) {
+            return null;
+        }
+
+        // The minimum of latest timestamp from each replica
+        // is the causally stable threshold.
+        $oldest = null;
+        foreach( $this->latest_time_by_replica as $id => $timestamp ) {
+            if(!$oldest || $timestamp->lt($oldest)) {
+                $oldest = $timestamp;
+            }
+        }
+        return $oldest;
+    }
+
+    function truncate_log(): bool {
+        $t = $this->causally_stable_threshold();
+        if($t) {
+            return $this->state->truncate_log_before($t);
+        }
+        return false;
     }
 
     function tick() {
@@ -967,6 +1037,70 @@ function test_walk_deep_tree() {
     printf("\ntree walk duration: %.8f, per node: %.8f\n", $elapsed, $elapsed / count($ops));
 }
 
+// apply same ops to a list of replicas.
+// for testing only.
+function apply_ops_to_replicas(array $replicas, array $ops) {
+    foreach($replicas as $r) {
+        $r->apply_ops($ops);
+    }
+}
+
+function test_truncate_log() {
+
+    $replicas = [];
+    $num_replicas = 5;
+
+    // start some replicas.
+    for($i = 0; $i < $num_replicas; $i++) {
+        $r = new replica();
+        $replicas[$r->id] = $r;
+    }
+
+    // each replica must know about all replicas.
+    $replica_ids = array_keys($replicas);
+    foreach($replicas as $id => $r) {
+        $r->set_replica_list($replica_ids);
+    }
+
+    // Generate initial tree state.
+    $ops = [new op_move($replicas[$id]->tick(), null, "root", $root_id = new_id())];
+
+    echo "generating initial move operations...\n";
+
+    // apply some initial ops to all replicas.
+    foreach($replicas as $r) {
+        mktree_ops($ops, $r, $root_id, 2, rand(3,8));
+    }
+    printf("applying %s operations to all %s replicas...\n", count($ops), count($replicas));
+    apply_ops_to_replicas($replicas, $ops);
+
+    // apply additional ops to all but one replica.
+    $subset = $replicas;
+    shuffle($subset);
+    array_pop($subset);
+    $ops2 = [];
+    echo "generating initial move operations for replica subset...\n";
+    mktree_ops($ops2, $subset[0], $root_id, 2, rand(5,8));
+    printf("applying %s operations to %s replica subset...\n", count($ops2), count($subset));
+    apply_ops_to_replicas($subset, $ops2);
+
+    $stats = [];
+    foreach($replicas as $r) {
+        echo "truncating log of replica {$r->id}...\n";
+        $id = $r->id;
+        $stats[$id]['ops_before_truncate'] = count($r->state->log_op_list);
+        $r->truncate_log();
+        $stats[$id]['ops_after_truncate'] = count($r->state->log_op_list);
+    }
+
+    echo "\n";
+    print_r($stats);
+}
+
+
+function test_move_to_trash() {
+}
+
 
 /*****************************************
  * Main.   Let's run some tests.
@@ -982,6 +1116,7 @@ function main() {
         case 'test_add_nodes'; test_add_nodes(); break;
         case 'test_move_node_deep_tree': test_move_node_deep_tree(); break;
         case 'test_walk_deep_tree': test_walk_deep_tree(); break;
+        case 'test_truncate_log': test_truncate_log(); break;
         default: print_help(); exit;
     }
 
@@ -1004,6 +1139,7 @@ Usage: tree.php <test>
   test_add_nodes
   test_move_node_deep_tree
   test_walk_deep_tree
+  test_truncate_log  
 
 
 END;
