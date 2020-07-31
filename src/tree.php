@@ -188,6 +188,19 @@ class tree {
         }
     }
 
+    // removes a subtree.  useful for emptying trash.
+    // not used by crdt algo.
+    function rm_subtree($parent_id, $include_parent = false) {
+        $children = $this->children($parent_id);
+        foreach($children as $c) {
+            $this->rm_subtree($c);
+            $this->rm_child($c);
+        }
+        if($include_parent) {
+            $this->rm_child($parent_id);
+        }
+    }
+
     // adds a node to the tree
     function add_node($child_id, tree_node $tt) {
         $this->triples[$child_id] = $tt;
@@ -210,7 +223,7 @@ class tree {
     // walks tree and calls callback fn for each node.
     // not used by crdt algo.
     function walk($parent_id, $callback) {
-        $callback($parent_id);
+        $callback($this, $parent_id);
         $children = $this->children($parent_id);
         foreach($children as $c) {
             $this->walk($c, $callback);
@@ -510,7 +523,7 @@ class global_time implements clock_interface {
     }
 
     function inc() {
-        return new global_time(null);
+        return new global_time($this->actor_id);
     }
 
     function actor_id() {
@@ -555,7 +568,7 @@ function print_treenode(tree $tree, $node_id, $depth=0) {
     $tn = $tree->find($node_id);
     
     $indent = str_pad("", $depth*2);
-    printf("%s- %s\n", $indent, $node_id === null ? '/' : $tn->meta);
+    printf("%s- %s\n", $indent, $node_id === null ? 'forest' : $tn->meta);
 
     foreach($tree->children($node_id) as $c) {
         print_treenode($tree, $c, $depth+1);
@@ -582,7 +595,6 @@ class replica {
     public $state;   // state
     public $time;    // must implement clock_interface
 
-    public $replica_list = [];  // list of replica IDs.
     public $latest_time_by_replica = []; 
 
     static private $clock_type = "la_time";   // la_time | global_time
@@ -600,13 +612,6 @@ class replica {
         }
     }
 
-    // set array of replica IDs.
-    function set_replica_list(array $replicas) {
-        foreach($replicas as $id) {
-            $this->replica_list[$id] = true;
-        }
-    }
-
     function apply_ops(array $ops, $debug = false) {
         foreach($ops as $op) {
             if($debug) {
@@ -620,24 +625,25 @@ class replica {
             $this->state = apply_op($op, $this->state);
             $this->time->merge($op->timestamp);
 
+            // store latest timestamp for this actor.
             $id = $op->timestamp->actor_id();
-            if( @$this->replica_list[$id] ) {
-                $latest = @$this->latest_time_by_replica[$id];
-                if(!$latest || $op->timestamp->gt($latest)) {
-                    $this->latest_time_by_replica[$id] = $op->timestamp;
-                }
+            $latest = @$this->latest_time_by_replica[$id];
+            if(!$latest || $op->timestamp->gt($latest)) {
+                $this->latest_time_by_replica[$id] = $op->timestamp;
             }
         }
     }
 
-    function causally_stable_threshold(): ?clock_interface {
-        // Check that we have a known latest timestamp for each
-        // known replica.   If not, there is no causally stable threshold.
-        $cnt_known_replicas = count($this->replica_list);
-        $cnt_known_times = count($this->latest_time_by_replica);
-        if($cnt_known_replicas != $cnt_known_times) {
-            return null;
+    // applies ops from a log.  useful for log replay.
+    function apply_log_ops(array $log_ops) {
+        $ops = [];
+        foreach($log_ops as $log_op) {
+            $ops[] = op_move::from_log_op_move($log_op);
         }
+        $this->apply_ops($ops);
+    }
+
+    function causally_stable_threshold(): ?clock_interface {
 
         // The minimum of latest timestamp from each replica
         // is the causally stable threshold.
@@ -1026,7 +1032,7 @@ function test_walk_deep_tree() {
     echo "walking tree...\n";
     $start = microtime(true);
 
-    $cb = function($node_id) {};
+    $cb = function($tree, $node_id) {};
     $r1->state->tree->walk($root_id, $cb);
 
     $end = microtime(true);
@@ -1056,35 +1062,21 @@ function test_truncate_log() {
         $replicas[$r->id] = $r;
     }
 
-    // each replica must know about all replicas.
-    $replica_ids = array_keys($replicas);
-    foreach($replicas as $id => $r) {
-        $r->set_replica_list($replica_ids);
-    }
-
     // Generate initial tree state.
-    $ops = [new op_move($replicas[$id]->tick(), null, "root", $root_id = new_id())];
+    $ops = [new op_move(current($replicas)->tick(), null, "root", $root_id = new_id())];
 
-    echo "generating initial move operations...\n";
+    echo "generating move operations...\n";
 
     // apply some initial ops to all replicas.
+    $r_ops_counts = [];
     foreach($replicas as $r) {
-        mktree_ops($ops, $r, $root_id, 2, rand(3,8));
+        mktree_ops($ops, $r, $root_id, 2, rand(3,6));
     }
     printf("applying %s operations to all %s replicas...\n", count($ops), count($replicas));
     apply_ops_to_replicas($replicas, $ops);
 
-    // apply additional ops to all but one replica.
-    $subset = $replicas;
-    shuffle($subset);
-    array_pop($subset);
-    $ops2 = [];
-    echo "generating initial move operations for replica subset...\n";
-    mktree_ops($ops2, $subset[0], $root_id, 2, rand(5,8));
-    printf("applying %s operations to %s replica subset...\n", count($ops2), count($subset));
-    apply_ops_to_replicas($subset, $ops2);
-
     $stats = [];
+    $errors = [];
     foreach($replicas as $r) {
         echo "truncating log of replica {$r->id}...\n";
         $id = $r->id;
@@ -1099,6 +1091,52 @@ function test_truncate_log() {
 
 
 function test_move_to_trash() {
+
+    $r1 = new replica();
+    $r2 = new replica();
+
+    // Generate initial tree state.
+    //
+    // - trash
+    // - root
+    //   - home
+    //     - bob
+    //       - project
+    $ops = [new op_move($r1->tick(), null, "root", $root_id = new_id()),
+            new op_move($r1->tick(), null, "trash", $trash_id = new_id()),
+            new op_move($r1->tick(), $root_id, "home", $home_id = new_id()),
+            new op_move($r1->tick(), $home_id, "bob", $bob_id = new_id()),
+            new op_move($r1->tick(), $bob_id, "project", $project_id = new_id()),
+    ];
+    // add some nodes under project
+    mktree_ops($ops, $r1, $project_id, 2, 3);
+    apply_ops_to_replicas([$r1, $r2], $ops);
+
+    printf("Initial tree\n");
+    print_tree($r1->state->tree);
+
+    // move project to trash
+    $ops = [$trash_op = new op_move($r1->tick(), $trash_id, "project", $project_id),];
+    apply_ops_to_replicas([$r1, $r2], $ops);
+
+    printf("\nAfter project moved to trash (deleted) on both replicas\n");
+    print_tree($r1->state->tree);
+ 
+    // Initially, trashed nodes must be retained because a concurrent move
+    // operation may move them back out of the trash.
+    //
+    // Once the operation that moved a node to the trash is causally
+    // stable, we know that no future operations will refer to this node,
+    // and so the trashed node and its descendants can be discarded.
+    $cst = $r1->causally_stable_threshold();
+    if(!$cst || $cst->lt($trash_op->timestamp)) {
+        die("error: causally stable threshold not found or less than trash operation");
+    }
+
+    // empty trash
+    $r1->state->tree->rm_subtree($trash_id);
+    printf("\nDelete op is now causally stable, so we can empty trash:\n");
+    print_tree($r1->state->tree);
 }
 
 
@@ -1117,6 +1155,7 @@ function main() {
         case 'test_move_node_deep_tree': test_move_node_deep_tree(); break;
         case 'test_walk_deep_tree': test_walk_deep_tree(); break;
         case 'test_truncate_log': test_truncate_log(); break;
+        case 'test_move_to_trash': test_move_to_trash(); break;
         default: print_help(); exit;
     }
 
@@ -1140,7 +1179,7 @@ Usage: tree.php <test>
   test_move_node_deep_tree
   test_walk_deep_tree
   test_truncate_log  
-
+  test_move_to_trash
 
 END;
 }
