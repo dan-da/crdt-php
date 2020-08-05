@@ -176,7 +176,7 @@ class tree_node {
 // Presented in paper as:
 //   ('n x 'm x 'n)
 class tree {
-    public $triples = [];
+    public $triples = [];   // tree_nodes, indexed by child_id.
     public $children = [];  // parent_id => [child_id => true].  optimization.
 
     // helper for removing a triple based on child_id
@@ -559,26 +559,33 @@ class global_time implements clock_interface {
 //
 // In practice, this would be some type of UUID
 function new_id(): int {
-    static $ids = 0;
+    static $ids = 1000;
     return $ids++;
 }
 
 // print a treenode, recursively
-function print_treenode(tree $tree, $node_id, $depth=0) {
+function print_treenode(tree $tree, $node_id, $depth=0, $with_id = false) {
     $tn = $tree->find($node_id);
+
+    if(!$tn && $tn !== null) {
+        throw new Exception("tree node $node_id not found");
+    }
     
     $indent = str_pad("", $depth*2);
-    printf("%s- %s\n", $indent, $node_id === null ? 'forest' : $tn->meta);
+    $meta = $node_id === null ? '' : (is_string($tn->meta) ? $tn->meta : json_encode($tn->meta));
+    $node_id_str = $node_id === null ? 'null => ' : "$node_id => ";
+    $node_id_str = $with_id ? $node_id_str : '';
+    printf("%s- %s%s\n", $indent, $node_id_str, $node_id === null ? 'forest' : $meta);
 
     foreach($tree->children($node_id) as $c) {
-        print_treenode($tree, $c, $depth+1);
+        print_treenode($tree, $c, $depth+1, $with_id);
     }
 }
 
 // print a tree.  (by first converting to a treenode)
-function print_tree(tree $t) {
+function print_tree(tree $t, $with_id=false) {
     // $root = tree_to_treenode($t);
-    print_treenode($t, null);
+    print_treenode($t, null, 0, $with_id);
 }
 
 // Test helper routine
@@ -589,6 +596,7 @@ function print_replica_trees(state $repl1, state $repl2) {
     print_tree($repl2->tree);
     echo "\n";
 }
+
 
 class replica {
     public $id;      // globally unique id.
@@ -1139,6 +1147,13 @@ function test_move_to_trash() {
     print_tree($r1->state->tree);
 }
 
+function test_filesystem_inodes() {
+
+    $r1 = new replica();
+    $r2 = new replica();
+
+}
+
 
 /*****************************************
  * Main.   Let's run some tests.
@@ -1184,7 +1199,9 @@ Usage: tree.php <test>
 END;
 }
 
-main();
+if($_SERVER["SCRIPT_FILENAME"] == basename(__FILE__)) {
+    main();
+}
 
 
 
