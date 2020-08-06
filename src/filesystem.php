@@ -225,6 +225,41 @@ class filesystem {
         return $ino;
     }
 
+    // Remove a directory
+    public function rmdir(int $parent_ino, string $name) {
+
+        $r = $this->replica;
+        $ops = [];
+
+        // 1. find parent_id from parent_ino.
+        $parent_id = $this->ino_to_tree_id($parent_ino);
+
+        // 2. find child matching name
+        $result = $this->child_by_name($parent_id, $name);
+        if( !$result ) {
+            throw new Exception("Not found: $name");
+        }
+        list($node_id, $node) = $result;
+
+        // 3. Ensure we have a directory
+        if($node->meta->kind != inode_kind::directory) {
+            throw new Exception("Not a directory");
+        }
+
+        // 4. Ensure dir is empty.
+        $children = $r->state->tree->children($node_id);
+        if(count($children)) {
+            throw new Exception("Directory not empty");
+        }
+
+        // 5. Generate op to move dir node to trash.
+        list($trash_id) = $this->trash();
+        $ops[] = new op_move($r->tick(), $trash_id, null, $node_id);
+
+        $r->apply_ops($ops);
+    }
+
+
     // Rename a file, dir, or symlink
     public function rename(int $parent_ino, string $name, int $newparent_ino, string $newname) {
 
@@ -690,6 +725,36 @@ function test_fs_symlink() {
     }
 }
 
+function test_fs_rmdir() {
+    // init filesystem
+    $fs = new filesystem(new replica());
+    $fs->init();
+
+    // get ino for /
+    $ino_root = $fs->lookup("/");
+
+    // create /home/bob/projects
+    $ino_home = $fs->mkdir($ino_root, "home" );
+    $ino_bob = $fs->mkdir($ino_home, "bob" );
+    $ino_projects = $fs->mkdir($ino_bob, "projects" );
+
+    // create /home/bob/homework.txt and hard-link homework-link.txt
+    $ino_homework = $fs->mknod($ino_bob, "homework.txt", 'c' );
+
+    $fs->rmdir($ino_bob, "projects");
+
+    $fs->print_current_state("removed directory projects");
+
+    echo "\n";
+    try {
+        $fs->rmdir($ino_home, "bob");
+        echo "Error: rmdir did not throw exception when removing non-empty directory.\n";
+    }
+    catch(Exception $e) {
+        echo "success: rmdir threw exception when removing non-empty directory.\n";
+    }
+}
+
 
 
 function fs_main() {
@@ -701,6 +766,7 @@ function fs_main() {
         'test_fs_write_and_read',
         'test_fs_rename',
         'test_fs_symlink',
+        'test_fs_rmdir',
     ];
 
     if(in_array($test, $tests)) {
