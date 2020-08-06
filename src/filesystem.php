@@ -412,6 +412,54 @@ class filesystem {
         return true;
     }
 
+    // Create a symlink (soft-link)
+    public function symlink(string $link, int $parent_ino, string $name): int {
+
+        $r = $this->replica;
+        $ops = [];
+
+        // 1. find parent_id (uuid of fs_inode_entry) from parent_ino.
+        $parent_id = $this->ino_to_tree_id($parent_ino);
+
+        // 2. find parent dir (under /root/)
+        $inode_entry = $r->state->tree->find($parent_id);
+        if(!$inode_entry) {
+            throw new Exception("Missing inode entry for $parent_id");
+        }
+
+        // 3. create tree node under /root/../parent_id
+        $fim = new fs_inode_meta($name, inode_kind::symlink);
+        $fim->link = $link;   // we are setting a non-existent property, gross!  but in PHP we can roll like that.
+        $ops[] = new op_move($r->tick(), $parent_id, $fim, $new_inode_id = new_id() );
+
+        // 4. create/add fs_inode_local
+        $ino = $this->add_fs_inode_local($new_inode_id, $fim->kind);
+
+        $r->apply_ops($ops);
+
+        return $ino;
+    }
+
+    // read symlink
+    public function readlink(int $ino): string {
+        $r = $this->replica;
+
+        // 1. find parent_id (uuid of fs_inode_entry) from parent_ino.
+        $parent_id = $this->ino_to_tree_id($ino);
+
+        // 2. find parent dir (under /root/)
+        $inode_entry = $r->state->tree->find($parent_id);
+        if(!$inode_entry) {
+            throw new Exception("Missing inode entry for $parent_id");
+        }
+
+        if(!$inode_entry->meta->kind == inode_kind::symlink) {
+            throw new Exception("Inode is not a symlink. $ino");
+        }
+
+        return $inode_entry->meta->link;
+    }
+
     // prints current state of the filesystem
     public function print_current_state(string $description="") {
         $title = $description ? "fs state after: $description" : 'current filesystem state';
@@ -609,6 +657,38 @@ function test_fs_rename() {
     $fs->print_current_state("Files and directory renamed/moved");
 }
 
+function test_fs_symlink() {
+    // init filesystem
+    $fs = new filesystem(new replica());
+    $fs->init();
+
+    // get ino for /
+    $ino_root = $fs->lookup("/");
+
+    // create /home/bob/projects
+    $ino_home = $fs->mkdir($ino_root, "home" );
+    $ino_bob = $fs->mkdir($ino_home, "bob" );
+    $ino_projects = $fs->mkdir($ino_bob, "projects" );
+
+    // create /home/bob/homework.txt and hard-link homework-link.txt
+    $ino_homework = $fs->mknod($ino_bob, "homework.txt", 'c' );
+
+    $inos = [];
+    $inos[] = $fs->symlink("homework.txt", $ino_bob, "rel-file-link.txt");
+    $inos[] = $fs->symlink("/home/bob/homework.txt", $ino_bob, "abs-file-link.txt");
+    $inos[] = $fs->symlink("../homework.txt", $ino_bob, "rel-file-link.txt");
+    $inos[] = $fs->symlink("non-existent.txt", $ino_bob, "broken-file-link.txt");
+
+    $inos[] = $fs->symlink("projects", $ino_bob, "rel-dir-link");
+    $inos[] = $fs->symlink("..", $ino_projects, "parent-dir-link");
+
+    $fs->print_current_state("Symlinks created");
+
+    echo "\n\n-- reading symlinks --\n";
+    foreach($inos as $ino) {
+        printf("%s - %s\n", $ino, $fs->readlink($ino));
+    }
+}
 
 
 
@@ -620,6 +700,7 @@ function fs_main() {
         'test_fs_readdir',
         'test_fs_write_and_read',
         'test_fs_rename',
+        'test_fs_symlink',
     ];
 
     if(in_array($test, $tests)) {
