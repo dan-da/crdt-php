@@ -144,7 +144,7 @@ class filesystem {
                 array_shift($parts);
             }
             foreach($parts as $name) {
-                $result = $this->child_by_name($node_id, $name);
+                $result = $this->child_by_name($node_id, $name, false);
                 if( $result ) {
                     list($node_id, $node) = $result;
                 } else {
@@ -186,7 +186,7 @@ class filesystem {
             return null;
         }
 
-        $tree_node = $r->state->tree->find($child_id);
+        $tree_node = $this->tree_find($child_id);
         $m = $tree_node->meta;
         $inode_id = property_exists($m, 'inode_id') ? $m->inode_id : $child_id;
         $local_entry = $this->uuid_inodes_local[$inode_id];
@@ -208,10 +208,7 @@ class filesystem {
         $parent_id = $this->ino_to_tree_id($parent_ino);
 
         // 2. find parent dir (under /root/)
-        $inode_entry = $r->state->tree->find($parent_id);
-        if(!$inode_entry) {
-            throw new Exception("Missing inode entry for $parent_id");
-        }
+        $inode_entry = $this->tree_find($parent_id);
 
         // 3. create tree node under /root/../parent_id
         $fim = new fs_inode_meta($name, inode_kind::directory);
@@ -235,11 +232,7 @@ class filesystem {
         $parent_id = $this->ino_to_tree_id($parent_ino);
 
         // 2. find child matching name
-        $result = $this->child_by_name($parent_id, $name);
-        if( !$result ) {
-            throw new Exception("Not found: $name");
-        }
-        list($node_id, $node) = $result;
+        list($node_id, $node) = $this->child_by_name($parent_id, $name);
 
         // 3. Ensure we have a directory
         if($node->meta->kind != inode_kind::directory) {
@@ -273,11 +266,7 @@ class filesystem {
         $newparent_id = $this->ino_to_tree_id($newparent_ino);
 
         // 3. find child of parent that matches $name
-        $result = $this->child_by_name($parent_id, $name);
-        if(!$result) {
-            throw new Exception("no such file: $name");
-        }
-        list($node_id, $node) = $result;
+        list($node_id, $node) = $this->child_by_name($parent_id, $name);
         $node->meta->name = $newname;
 
         // 4. move child to new location/name
@@ -298,10 +287,7 @@ class filesystem {
         $parent_id = $this->ino_to_tree_id($parent_ino);
 
         // 2. find parent dir (under /root/)
-        $inode_entry = $r->state->tree->find($parent_id);
-        if(!$inode_entry) {
-            throw new Exception("Missing inode entry for $parent_id");
-        }
+        $inode_entry = $this->tree_find($parent_id);
 
         // 3. create tree node under /inodes/<x>
         $fim = new fs_inode_file_meta();
@@ -342,7 +328,10 @@ class filesystem {
         // 1. find inode_id from file_ino.
         $inode_id = $this->ino_to_tree_id($file_ino);
 
-        $tree_node = $r->state->tree->find($inode_id);
+        // 2. find tree node from inode_id
+        $tree_node = $this->tree_find($inode_id);
+
+        // 3. Append to content in metadata
         $meta = $tree_node->meta;
         $meta->content .= $data;
 
@@ -359,7 +348,7 @@ class filesystem {
         // 1. find inode_id from file_ino.
         $inode_id = $this->ino_to_tree_id($file_ino);
 
-        $tree_node = $r->state->tree->find($inode_id);
+        $tree_node = $this->tree_find($inode_id);
         
         return $tree_node->meta->content;
     }
@@ -416,11 +405,7 @@ class filesystem {
         $parent_id = $this->ino_to_tree_id($parent_ino);
 
         // 2. find child of parent that matches $name
-        $result = $this->child_by_name($parent_id, $name);
-        if(!$result) {
-            throw new Exception("no such file: $name");
-        }
-        list($node_id, $node) = $result;
+        list($node_id, $node) = $this->child_by_name($parent_id, $name);
 
         // 3. move child to trash.  (delete)
         list($trash_id) = $this->trash();
@@ -457,10 +442,7 @@ class filesystem {
         $parent_id = $this->ino_to_tree_id($parent_ino);
 
         // 2. find parent dir (under /root/)
-        $inode_entry = $r->state->tree->find($parent_id);
-        if(!$inode_entry) {
-            throw new Exception("Missing inode entry for $parent_id");
-        }
+        $inode_entry = $this->tree_find($parent_id);
 
         // 3. create tree node under /root/../parent_id
         $fim = new fs_inode_meta($name, inode_kind::symlink);
@@ -483,11 +465,9 @@ class filesystem {
         $parent_id = $this->ino_to_tree_id($ino);
 
         // 2. find parent dir (under /root/)
-        $inode_entry = $r->state->tree->find($parent_id);
-        if(!$inode_entry) {
-            throw new Exception("Missing inode entry for $parent_id");
-        }
+        $inode_entry = $this->tree_find($parent_id);
 
+        // 3. Ensure this node is a symlink
         if(!$inode_entry->meta->kind == inode_kind::symlink) {
             throw new Exception("Inode is not a symlink. $ino");
         }
@@ -531,8 +511,17 @@ class filesystem {
         return $local->ino;
     }
 
+    // return crdt-tree node for a given ID.
+    private function tree_find(int $node_id) {
+        $node = $this->replica->state->tree->find($node_id);
+        if(!$node) {
+            throw new Exception("Missing entry for $node_id");
+        }
+        return $node;
+    }
+
     // Get child of a directory by name.
-    private function child_by_name($parent_id, $name): ?array {
+    private function child_by_name(?int $parent_id, string $name, bool $throw=true): ?array {
         $t = $this->replica->state->tree;
         foreach($t->children($parent_id) as $child_id) {
             $node = $t->find($child_id);
@@ -540,16 +529,15 @@ class filesystem {
                 return [$child_id, $node];
             }
         }
+        if($throw) {
+            throw new Exception("Not found: $name");
+        }
         return null;
     }
 
     // retrieve a top-level forest node (root, fileinodes, or trash)
     private function toplevel($name) {
-        $result = $this->child_by_name(null, $name);
-        if(!$result) {
-            throw new Exception("$name not found!");
-        }
-        return $result;
+        return $this->child_by_name(null, $name);
     }
 
     // retrieve root, fileinodes and trash top level forest nodes.
