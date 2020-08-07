@@ -2,26 +2,66 @@
 
 require_once(__DIR__ . '/tree.php');
 
+// This file represents a first attempt to implement a basic
+// filesystem API (based on FUSE low-level api) that utilizes
+// the crdt-tree (tree.php) for its data store.
+//
+// Basically a quick/dirty proof of concept.
+//
+// There is some related design discussion, starting at:
+//  https://forum.safedev.org/t/filetree-crdt-for-safe-network/2833/41
+//
+// At init(), the filesystem creates a "forest" of trees that looks like:
+//
+// forest
+//  - root
+//  - fileinodes
+//  - trash
+//
+// Some basics of the design:
+//  * All paths in the filesystem are represented by nodes under
+//    root, which can be of kind: dir, symlink, file-ref.
+//  * inode entries for dir and symlink are stored in each nodes
+//    metadata (beneath root)
+//  * file-ref nodes store only [name, inode_id], where inode_id
+//    identifies a node under /fileinodes.  In this way, multiple
+//    file-ref can reference a single inode, which is how we support
+//    hard-links.
+//  * file inode entries are stored under /fileinodes.
+//  * deleted (unlinked) nodes are moved to /trash
+//  * ino numbers and counts are not stored in the crdt-tree at all
+//    but rather in a local data structure.  In this sense, each
+//    inode entry is split into network inode and local inode.
+
+// To help illustrate the above, here is an example of the 
+// filesystem state after creating /home/bob/homework.txt and 
+// then adding a hardlink to homework.txt.
+
 /*
+- null => forest
+  - 1000 => {"name":"root","size":0,"ctime":1596843790,"mtime":1596843790,"kind":"dir"}
+    - 1003 => {"name":"home","size":0,"ctime":1596843790,"mtime":1596843790,"kind":"dir"}
+      - 1004 => {"name":"bob","size":0,"ctime":1596843790,"mtime":1596843790,"kind":"dir"}
+        - 1006 => {"name":"homework.txt","inode_id":1005}
+        - 1007 => {"name":"homework-link.txt","inode_id":1005}
+  - 1001 => {"name":"fileinodes","size":0,"ctime":1596843790,"mtime":1596843790,"kind":"dir"}
+    - 1005 => {"size":0,"ctime":1596843790,"mtime":1596843790,"kind":"file","content":null}
+  - 1002 => {"name":"trash","size":0,"ctime":1596843790,"mtime":1596843790,"kind":"dir"}
 
-format: parent_id, meta, child_id.    (where parent_id and child_id are uuid)
+ino --> fs_inode_local:
+3 => {"ino":3,"tree_id":1000,"ref_count":2,"links":1,"is_file":false}
+4 => {"ino":4,"tree_id":1003,"ref_count":1,"links":1,"is_file":false}
+5 => {"ino":5,"tree_id":1004,"ref_count":1,"links":1,"is_file":false}
+6 => {"ino":6,"tree_id":1005,"ref_count":1,"links":2,"is_file":true}
 
-- null, (name<root>, inode<(type<dir>, size<0>, ctime<x>, mtime<x>)>), 1
-  - 1, (name<file1>, inode_uuid<123>), 555
-  - 1, (name<file2>, inode_uuid<123>), 556
-- null, (name<fileinodes>), 2 
-  - 2, (type<file>, size<510>, ctime<x>, mtime<x>, xorname<hash>), 123
-- null, (name<trash>), 3
-
-plus, we have a purely local hashmap/dictionary/index of uuid => local_inode_entry:
-
-123 ---> (ino<5>, uuid<123>, lookup_cnt<2>, is_file<true>)
-
-and another that is ino => local_inode_entry:
-
-5 ---> (ino<5>, uuid<123>, lookup_cnt<2>, is_file<true>)
-
+uuid --> fs_inode_local:
+1000 => {"ino":3,"tree_id":1000,"ref_count":2,"links":1,"is_file":false}
+1003 => {"ino":4,"tree_id":1003,"ref_count":1,"links":1,"is_file":false}
+1004 => {"ino":5,"tree_id":1004,"ref_count":1,"links":1,"is_file":false}
+1005 => {"ino":6,"tree_id":1005,"ref_count":1,"links":2,"is_file":true}
 */
+
+
 
 // metadata for tree nodes of type dir/symlink that live under forest/root (not files)
 class fs_inode_meta {
