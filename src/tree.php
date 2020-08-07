@@ -1,17 +1,26 @@
 <?php
 
-// This code is a first attempt to implement the CRDT Tree algorithm
+// This code is a 2nd attempt to implement the CRDT Tree algorithm
 // described in the paper "A highly-available move operation for 
 // replicated trees and distributed filesystems" by Kleppman et al.
 //    Link:  https://martin.kleppmann.com/papers/move-op.pdf
 //
+// For the first attempt, see tree-set.php.
+//
 // Many/most comments in the code are taken directly from the paper
 // as the authors describe the algo.
 //
-// This first implementation defines the tree data structure
-// as an unordered list (set) of triples.  This is not efficient
-// but it most closely follows the formally proven algo presented
-// in the paper.
+// This 2nd implementation aims to be more efficient (and faster)
+// than the first set-based approach.
+//
+// Here we define the tree data structure as a map of 
+// child_id --> [parent_id, meta].  This pattern was
+// described in the paper in Section 4.3 for the purpose of 
+// making the algorithm executable.
+//
+// Additionally, a second map is maintained of 
+// parent_id --> [child_id, child_id, ...].
+// This makes it efficient to lookup children of a given parent.
 //
 // Presently, this file does not match the usage pattern of
 // the other crdt algo's in this directory.  This file is self
