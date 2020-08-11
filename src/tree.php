@@ -87,7 +87,7 @@ class log_op_move {
     public $child_id;    // globally unique, eg uuid
     public $oldp;        // None/null or tree_node
 
-    function __construct(op_move $op, $oldp = null) {
+    function __construct(op_move $op, ?tree_node $oldp = null) {
         $this->timestamp = $op->timestamp;
         $this->parent_id = $op->parent_id;
         $this->metadata = $op->metadata;

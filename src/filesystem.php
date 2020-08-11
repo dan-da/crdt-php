@@ -196,6 +196,9 @@ class filesystem {
         // step 2.  Find node local inode data matching $node_id
         $tn = $this->uuid_inodes_local[$node_id];
         if(!$tn) {
+            // note: in a real impl, we would allocate the inode here,
+            // and de-allocate in forget() when ref-count drops to zero.
+
             throw new Exception("Filesystem out of sync!  local inode entry not found!");
         }
 
@@ -203,6 +206,33 @@ class filesystem {
         $tn->ref_count ++;
 
         return $tn->ino;
+    }
+
+    /*
+	 * Forget about an inode
+	 *
+	 * The nlookup parameter indicates the number of lookups
+	 * previously performed on this inode.
+	 *
+	 * If the filesystem implements inode lifetimes, it is recommended
+	 * that inodes acquire a single reference on each lookup, and lose
+	 * nlookup references on each forget.
+	 *
+	 * The filesystem may ignore forget calls, if the inodes don't
+	 * need to have a limited lifetime.
+	 *
+	 * On unmount it is not guaranteed, that all referenced inodes
+	 * will receive a forget message.
+     */    
+    public function forget(int $ino, int $nlookup) {
+        // 1. Find local entry.
+        $entry = $this->ino_to_local_entry($ino);
+
+        // decrement ref count
+        $entry->ref_count --;    // or -= $nlookup  ??
+
+        // note: in a real impl, we would de-allocate the inode here,
+        // when ref-count drops to zero.
     }
 
     // Open a directory
@@ -417,7 +447,7 @@ class filesystem {
         $parent_id = $this->ino_to_tree_id($parent_ino);
 
         // 2. find target id.
-        $target_local_inode = $this->ino_to_tree_entry($target_ino);
+        $target_local_inode = $this->ino_to_local_entry($target_ino);
         $target_id = $target_local_inode->tree_id;
 
         // 5. create tree entry under /root/../parent_id
@@ -586,7 +616,7 @@ class filesystem {
     private function trash() { return $this->toplevel("trash"); }
 
     // given a local ino, retrieve corresponding tree node
-    private function ino_to_tree_entry(int $ino) {
+    private function ino_to_local_entry(int $ino) {
         // 1. find parent_id (uuid of fs_inode_entry) from parent_ino.
         $local_inode = @$this->ino_inodes_local[$ino];
         if(!$local_inode) {
@@ -597,7 +627,7 @@ class filesystem {
 
     // given a local ino, retrieve corresponding tree node ID
     private function ino_to_tree_id(int $ino) {
-        $entry = $this->ino_to_tree_entry($ino);
+        $entry = $this->ino_to_local_entry($ino);
         return $entry->tree_id;
     }
 }
