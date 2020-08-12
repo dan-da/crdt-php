@@ -315,7 +315,7 @@ function do_op(op_move $op, tree $t): array {
     // field is filled in based on the state of the tree before the move.
     // If c did not exist in the tree, oldp is set to None.  Otherwise
     // oldp records the previous parent and metadata of c.
-    $oldp = get_parent($t, $op->child_id);
+    $oldp = $t->find($op->child_id);
     $log = new log_op_move($op, $oldp);
 
     // ensures no cycles are introduced.  If the node c
@@ -640,7 +640,7 @@ class replica {
                 echo "==========================\n";
             } else 
             $this->state = apply_op($op, $this->state);
-            $this->time->merge($op->timestamp);
+            $this->time = $this->time->merge($op->timestamp);
 
             // store latest timestamp for this actor.
             $id = $op->timestamp->actor_id();
