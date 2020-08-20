@@ -749,11 +749,9 @@ function test_concurrent_moves() {
 
     // replica_1 applies his op, then merges op from replica_2
     $r1->apply_ops($repl1_ops);
-
     echo "\nreplica_1 tree after move\n";
     print_tree($r1->state->tree);
     $r1->apply_ops($repl2_ops);
-    print_tree($r1->state->tree);
 
     // replica_2 applies his op, then merges op from replica_1
     $r2->apply_ops($repl2_ops);
@@ -1145,9 +1143,14 @@ function test_move_to_trash() {
     // Once the operation that moved a node to the trash is causally
     // stable, we know that no future operations will refer to this node,
     // and so the trashed node and its descendants can be discarded.
+    //
+    // note:  change r1->tick() to r2->tick() for any of the above operations to 
+    //        make the causally stable threshold less than the trash operation
+    //        timestamp, which will cause this test to fail, ie hit the
+    //        "trash should not be emptied" condition.    
     $cst = $r1->causally_stable_threshold();
     if(!$cst || $cst->lt($trash_op->timestamp)) {
-        die("error: causally stable threshold not found or less than trash operation");
+        die("error: causally stable threshold not found or less than trash operation\n");
     }
 
     // empty trash
