@@ -132,7 +132,7 @@ class filesystem {
     private $ino_counter = 2;   // last created inode.
 
     // A crdt-tree replica, for applying tree operations.
-    private $replica;
+    public $replica;
 
     function __construct(replica $r) {
         $this->replica = $r;
@@ -630,6 +630,14 @@ class filesystem {
         $entry = $this->ino_to_local_entry($ino);
         return $entry->tree_id;
     }
+
+    // true if replica stat's are equal and local inode counts match.
+    public function is_equal(filesystem $other) {
+        return count($this->ino_inodes_local) == count($other->ino_inodes_local) &&
+               count($this->uuid_inodes_local) == count($other->uuid_inodes_local) &&
+               $this->ino_counter == $other->ino_counter &&
+               $this->replica->state == $other->replica->state;
+    }
 }
 
 
@@ -814,6 +822,47 @@ function test_fs_rmdir() {
 }
 
 
+// This test tries to sync two filesystems only by apply OpMove
+// from replica1 to replica2.
+//
+// That doesn't (presently) work because replica1 also has some
+// local state that does not get re-created by replica2 when
+// applying the ops.
+//
+// Basically, this test demonstrates that the present design does
+// not work for syncing two filesystem replicas, and so we are
+// back to the drawing board.
+function test_fs_replicas() {
+    // init filesystem, replica 1.
+    $fs1 = new filesystem(new replica());
+    $fs1->init();
+
+    // init filesystem, replica 2.
+    $fs2 = new filesystem(new replica());
+    $fs2->init();
+
+    // display state
+    $fs1->print_current_state("Initialized replica1 and replica2");
+
+    // get ino for /
+    $ino_root = $fs1->lookup("/");
+
+    // create /home/bob
+    $ino_home = $fs1->mkdir($ino_root, "home" );
+    $ino_bob = $fs1->mkdir($ino_home, "bob" );
+
+    $fs2->replica->apply_log_ops($fs1->replica->state->log_op_list);
+
+    if($fs1->is_equal($fs2)) {
+        echo "\n== Pass!  replica1 and replica2 filesystems match. ==\n";
+    } else {
+        echo "\n== Fail!  replica1 and replica2 filesystems do not match. ==\n";
+
+        $fs1->print_current_state("created /home/bob.  (replica1 state)");
+        $fs2->print_current_state("created /home/bob.  (replica2 state)");
+    }
+}
+
 
 function fs_main() {
     $test = @$GLOBALS['argv'][1];
@@ -825,6 +874,7 @@ function fs_main() {
         'test_fs_rename',
         'test_fs_symlink',
         'test_fs_rmdir',
+        'test_fs_replicas',
     ];
 
     if(in_array($test, $tests)) {
