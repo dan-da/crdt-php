@@ -839,10 +839,6 @@ function test_fs_replicas() {
 
     // init filesystem, replica 2.
     $fs2 = new filesystem(new replica());
-    $fs2->init();
-
-    // display state
-    $fs1->print_current_state("Initialized replica1 and replica2");
 
     // get ino for /
     $ino_root = $fs1->lookup("/");
