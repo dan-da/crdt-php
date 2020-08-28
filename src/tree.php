@@ -619,6 +619,8 @@ class replica {
     function __construct($id = null) {
         if(!$id) {
             $this->id = uniqid("replica_", true);
+        } else {
+            $this->id = $id;
         }
         $this->state = new state();
 
