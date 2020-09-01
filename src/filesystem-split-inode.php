@@ -140,6 +140,93 @@ class filesystem {
         return ino::combine($this->replica->id, $this->ino_counter++);
     }
 
+    private function apply_merge_log_op(log_op_move $op) {
+
+        // fs_inode_file_meta do not have 'name' attribute,
+        // so no possibility of conflict.  no-op.
+        if(!isset($op->metadata->name)) {
+            return;
+        }
+
+        $name = $op->metadata->name;
+
+        $matches = $this->children_with_name($op->parent_id, $name);
+        if(count($matches) <= 1) {
+            return;
+        }
+
+        $ops = [];
+        foreach($matches as $conflict) {
+            list($child_id, $tn) = $conflict;
+//            $tn->meta->name = sprintf( '%s.conflict.%s.%s', $tn->meta->name, $tn->timestamp->actor_id(), $tn->timestamp->counter());
+            $tn->meta->name = sprintf( '%s.conflict.%s', $tn->meta->name, $tn->timestamp->actor_id());
+            $ops[] = new op_move($this->replica->tick(), $tn->parent_id, $tn->meta, $child_id);
+        }
+        $this->replica->apply_ops($ops);
+    }
+
+    public function apply_merge_log_ops(array $ops) {
+        $this->replica->apply_log_ops($ops);
+
+        foreach($ops as $op) {
+            $this->apply_merge_log_op($op);
+        }
+    }
+
+    private function apply_merge_log_op_lww(log_op_move $op) {
+
+        // fs_inode_file_meta do not have 'name' attribute,
+        // so no possibility of conflict.  no-op.
+        if(!isset($op->metadata->name)) {
+            return;
+        }
+
+        $name = $op->metadata->name;
+
+        $matches = $this->children_with_name($op->parent_id, $name);
+        if(count($matches) <= 1) {
+            return;
+        }
+
+        $cb = function($a, $b) {
+            $at = $a[1]->timestamp;
+            $bt = $b[1]->timestamp;
+
+            // reverse order, greatest to least.
+            if( $at->eq($bt) ) {
+                return 0;
+            } else if ($at->lt($bt)) {
+                return 1;
+            } else {
+                return -1;
+            }
+        };
+
+        usort($matches, $cb);
+
+        $ops = [];
+        $cnt = 0;
+        foreach($matches as $conflict) {
+            if($cnt++ == 0) {
+                continue;
+            }
+            list($child_id, $tn) = $conflict;
+//            $tn->meta->name = sprintf( '%s.conflict.%s.%s', $tn->meta->name, $tn->timestamp->actor_id(), $tn->timestamp->counter());
+            $tn->meta->name = sprintf( '%s.conflict.%s', $tn->meta->name, $tn->timestamp->actor_id());
+            $ops[] = new op_move($this->replica->tick(), $tn->parent_id, $tn->meta, $child_id);
+        }
+        $this->replica->apply_ops($ops);
+    }
+
+    public function apply_merge_log_ops_lww(array $ops) {
+        $this->replica->apply_log_ops($ops);
+
+        foreach($ops as $op) {
+            $this->apply_merge_log_op_lww($op);
+        }
+    }
+
+
     // Initialize filesystem
     public function init() {
         $r = $this->replica;
@@ -315,6 +402,10 @@ class filesystem {
 
     // Create file node
     public function mknod(int $parent_ino, string $name, $mode) {
+
+        if( $this->child_by_name($parent_ino, $name, false)) {
+            throw new Exception("Already exists: $name");
+        }
 
         $r = $this->replica;
         $ops = [];
@@ -503,18 +594,37 @@ class filesystem {
     }
 
     // Get child of a directory by name.
-    private function child_by_name(?int $parent_id, string $name, bool $throw=true): ?array {
+    private function children_with_name(?int $parent_id, string $name, bool $throw=true): ?array {
+    
+        $matches = [];
         $t = $this->replica->state->tree;
         foreach($t->children($parent_id) as $child_id) {
             $node = $t->find($child_id);
             if($node && $node->meta->name == $name) {
-                return [$child_id, $node];
+                $matches[] = [$child_id, $node];
             }
         }
-        if($throw) {
+        if(count($matches) == 0 && $throw) {
             throw new Exception("Not found: $name");
         }
-        return null;
+        return $matches;
+    }
+
+
+    // Get child of a directory by name.
+    private function child_by_name(?int $parent_id, string $name, bool $throw=true): ?array {
+        $matches = $this->children_with_name($parent_id, $name, false);
+
+        switch(count($matches)) {
+            case 1: return $matches[0];
+            default:
+                if($throw) {
+                    $msg = count($matches) == 0 ? "Not found: $name" : "Found too many: $name";
+                    throw new Exception($msg);
+                } else {
+                    return null;
+                }
+        }
     }
 
     // retrieve a top-level forest node (root, fileinodes, or trash)
@@ -752,6 +862,134 @@ function test_fs_replicas() {
     }
 }
 
+function test_fs_filename_collision() {
+    // init filesystem, replica 1.
+    $fs1 = new filesystem(new replica(1));
+    $fs1->init();
+    $fs1->print_current_state("initialized. (replica1");
+
+    // init filesystem, replica 2.
+    $fs2 = new filesystem(new replica(2));
+
+    // get ino for /
+    $ino_root = $fs1->lookup("/");
+
+    // create /home/bob
+    $ino_tmp = $fs1->mkdir($ino_root, "tmp" );
+
+    $fs2->apply_merge_log_ops($fs1->replica->state->log_op_list);
+
+    $ino_f1 = $fs1->mknod($ino_tmp, "file1.txt", 'c' );
+    $fh = $fs1->open($ino_f1, 'w');
+    $fs1->write($ino_f1, $fh, "hello from replica1\n");
+    $fs1->flush($ino_f1, $fh);
+    $fs1->release($ino_f1, $fh);
+
+    $fs1->print_current_state("created /tmp/file1.txt.  (replica1)");
+
+    $ino_f1 = $fs2->mknod($ino_tmp, "file1.txt", 'c' );
+    $fh = $fs2->open($ino_f1, 'w');
+    $fs2->write($ino_f1, $fh, "hello from replica2\n");
+    $fs2->flush($ino_f1, $fh);
+    $fs2->release($ino_f1, $fh);
+
+    $fs2->print_current_state("created /tmp/file1.txt.  (replica2)");
+
+    // uncomment to test concurrent creation of conflict filename.
+    // $fs1->mknod($ino_tmp, "file1.txt.conflict.1", 'c' );
+
+    $fs2->apply_merge_log_ops($fs1->replica->state->log_op_list);
+    $fs1->apply_merge_log_ops($fs2->replica->state->log_op_list);
+
+    $fs1->print_current_state("merged ops from replica2. (replica1");
+
+    // apply conflict resolution ops generated by last merge.
+    $fs1->apply_merge_log_ops($fs2->replica->state->log_op_list);
+    $fs2->apply_merge_log_ops($fs1->replica->state->log_op_list);
+
+    $conflict_again = false;
+    if( $conflict_again ) {
+        $fs1->mknod($ino_tmp, "file1.txt", 'c' );
+        $fs2->mknod($ino_tmp, "file1.txt", 'c' );
+
+        $fs1->apply_merge_log_ops($fs2->replica->state->log_op_list);
+        $fs2->apply_merge_log_ops($fs1->replica->state->log_op_list);
+    }
+
+    if($fs1->is_equal($fs2)) {
+        echo "\n== Pass!  replica1 and replica2 filesystems match. ==\n";
+    } else {
+        echo "\n== Fail!  replica1 and replica2 filesystems do not match. ==\n";
+    }
+    $fs1->print_current_state("created /home/bob.  (replica1 state)");
+    $fs2->print_current_state("created /home/bob.  (replica2 state)");
+}
+
+
+function test_fs_filename_collision_lww() {
+    // init filesystem, replica 1.
+    $fs1 = new filesystem(new replica(1));
+    $fs1->init();
+    $fs1->print_current_state("initialized. (replica1");
+
+    // init filesystem, replica 2.
+    $fs2 = new filesystem(new replica(2));
+
+    // get ino for /
+    $ino_root = $fs1->lookup("/");
+
+    // create /home/bob
+    $ino_tmp = $fs1->mkdir($ino_root, "tmp" );
+
+    $fs2->apply_merge_log_ops($fs1->replica->state->log_op_list);
+
+    $ino_f1 = $fs1->mknod($ino_tmp, "file1.txt", 'c' );
+    $fh = $fs1->open($ino_f1, 'w');
+    $fs1->write($ino_f1, $fh, "hello from replica1\n");
+    $fs1->flush($ino_f1, $fh);
+    $fs1->release($ino_f1, $fh);
+
+    $fs1->print_current_state("created /tmp/file1.txt.  (replica1)");
+
+    $ino_f1 = $fs2->mknod($ino_tmp, "file1.txt", 'c' );
+    $fh = $fs2->open($ino_f1, 'w');
+    $fs2->write($ino_f1, $fh, "hello from replica2\n");
+    $fs2->flush($ino_f1, $fh);
+    $fs2->release($ino_f1, $fh);
+
+    $fs2->print_current_state("created /tmp/file1.txt.  (replica2)");
+
+    // uncomment to test concurrent creation of conflict filename.
+    $fs1->mknod($ino_tmp, "file1.txt.conflict.1", 'c' );
+
+    $fs2->apply_merge_log_ops_lww($fs1->replica->state->log_op_list);
+    $fs1->apply_merge_log_ops_lww($fs2->replica->state->log_op_list);
+
+    $fs1->print_current_state("merged ops from replica2. (replica1");
+
+    // apply conflict resolution ops generated by last merge.
+    $fs1->apply_merge_log_ops_lww($fs2->replica->state->log_op_list);
+    $fs2->apply_merge_log_ops_lww($fs1->replica->state->log_op_list);
+
+    $conflict_again = false;
+    if( $conflict_again ) {
+        $fs1->mknod($ino_tmp, "file1.txt", 'c' );
+        $fs2->mknod($ino_tmp, "file1.txt", 'c' );
+
+        $fs1->apply_merge_log_ops_lww($fs2->replica->state->log_op_list);
+        $fs2->apply_merge_log_ops_lww($fs1->replica->state->log_op_list);
+    }
+
+    if($fs1->is_equal($fs2)) {
+        echo "\n== Pass!  replica1 and replica2 filesystems match. ==\n";
+    } else {
+        echo "\n== Fail!  replica1 and replica2 filesystems do not match. ==\n";
+    }
+    $fs1->print_current_state("created /home/bob.  (replica1 state)");
+    $fs2->print_current_state("created /home/bob.  (replica2 state)");
+}
+
+
 
 function fs_main() {
     $test = @$GLOBALS['argv'][1];
@@ -764,6 +1002,8 @@ function fs_main() {
         'test_fs_symlink',
         'test_fs_rmdir',
         'test_fs_replicas',
+        'test_fs_filename_collision',
+        'test_fs_filename_collision_lww',
     ];
 
     if(in_array($test, $tests)) {
