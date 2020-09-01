@@ -165,16 +165,20 @@ class state {
 class tree_node {
     public $parent_id;
     public $meta;
+    public $timestamp;   // not part of algo in paper.  used for resolving metadata (eg filename)
+                         // conflicts.  If a better way is found, we can remove this.
     // note: child_id is stored only as a map key in tree.
 
-    function __construct($parent_id, $meta) {
+    function __construct($parent_id, $meta, $timestamp) {
         $this->parent_id = $parent_id;
         $this->meta = $meta;
+        $this->timestamp = $timestamp;
     }
 
     function is_equal(tree_node $other) {
         return $this->parent_id === $other->parent_id &&
-               $this->meta === $other->meta;
+               $this->meta === $other->meta &&
+               $this->timestamp == $other->timestamp;
     }
 
 }
@@ -333,7 +337,7 @@ function do_op(op_move $op, tree $t): array {
     // its existing parent, if any, and adding the new
     // parent-child relationship (newp, m, c) to the tree.
     $t->rm_child($op->child_id);
-    $tt = new tree_node($op->parent_id, $op->metadata);
+    $tt = new tree_node($op->parent_id, $op->metadata, $op->timestamp);
     $t->add_node($op->child_id, $tt);
 //    echo "tree changed!\n";
     return [$log, $t];
@@ -373,7 +377,7 @@ function undo_op(log_op_move $log, tree $t): tree {
         $t->rm_child($log->child_id);
 
         $oldp = $log->oldp;
-        $t->add_node($log->child_id, new tree_node($oldp->parent_id, $oldp->meta));
+        $t->add_node($log->child_id, new tree_node($oldp->parent_id, $oldp->meta, $oldp->timestamp));
     }
 
     return $t;
@@ -416,7 +420,7 @@ function apply_op(op_move $op1, state $state): state {
             // The crdt paper does not even check for this case.
             //
             // We throw an exception to catch it during dev/test.
-            throw new Exception("applying op with timestamp equal to previous op.  Every op should have a unique timestamp.");
+            // throw new Exception("applying op with timestamp equal to previous op.  Every op should have a unique timestamp.");
 
             // Or production code could just treat it as a non-op.
             return $state;
@@ -445,6 +449,7 @@ interface clock_interface {
     function __construct($actor_id);
     function inc();
     function actor_id();
+    function counter();
     function merge(clock_interface $other);
     function gt(clock_interface $other);
     function lt(clock_interface $other);
@@ -470,6 +475,10 @@ class la_time implements clock_interface {
 
     function actor_id() {
         return $this->actor_id;
+    }
+
+    function counter() {
+        return $this->counter;
     }
 
     // returns a new la_time with same actor but counter is
@@ -537,6 +546,10 @@ class global_time implements clock_interface {
 
     function actor_id() {
         return $this->actor_id;
+    }
+
+    function counter() {
+        return $this->count;
     }
 
     function merge(clock_interface $other) {
