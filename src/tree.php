@@ -165,8 +165,7 @@ class state {
 class tree_node {
     public $parent_id;
     public $meta;
-    public $timestamp;   // not part of algo in paper.  used for resolving metadata (eg filename)
-                         // conflicts.  If a better way is found, we can remove this.
+    
     // note: child_id is stored only as a map key in tree.
 
     function __construct($parent_id, $meta, $timestamp) {

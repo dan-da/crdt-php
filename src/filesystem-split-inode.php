@@ -159,8 +159,9 @@ class filesystem {
         foreach($matches as $conflict) {
             list($child_id, $tn) = $conflict;
 //            $tn->meta->name = sprintf( '%s.conflict.%s.%s', $tn->meta->name, $tn->timestamp->actor_id(), $tn->timestamp->counter());
-            $tn->meta->name = sprintf( '%s.conflict.%s', $tn->meta->name, $tn->timestamp->actor_id());
-            $ops[] = new op_move($this->replica->tick(), $tn->parent_id, $tn->meta, $child_id);
+            $replica_id = ino::get_a($child_id);
+            $tn->meta->name = sprintf( '%s.conflict.%s', $tn->meta->name, $replica_id );
+            $ops[] = $this->new_opmove($tn->parent_id, $tn->meta, $child_id);
         }
         $this->replica->apply_ops($ops);
     }
@@ -213,7 +214,7 @@ class filesystem {
             list($child_id, $tn) = $conflict;
 //            $tn->meta->name = sprintf( '%s.conflict.%s.%s', $tn->meta->name, $tn->timestamp->actor_id(), $tn->timestamp->counter());
             $tn->meta->name = sprintf( '%s.conflict.%s', $tn->meta->name, $tn->timestamp->actor_id());
-            $ops[] = new op_move($this->replica->tick(), $tn->parent_id, $tn->meta, $child_id);
+            $ops[] = $this->new_opmove($tn->parent_id, $tn->meta, $child_id);
         }
         $this->replica->apply_ops($ops);
     }
@@ -226,6 +227,13 @@ class filesystem {
         }
     }
 
+    function new_opmove($parent_id, $metadata, &$child_id) {
+        $ts = $this->replica->tick();
+        if( $child_id === null ) {
+            $child_id = ino::combine($ts->actor_id(), $ts->counter());
+        }
+        return new op_move($ts, $parent_id, $metadata, $child_id);
+    }
 
     // Initialize filesystem
     public function init() {
@@ -236,9 +244,9 @@ class filesystem {
         $meta3 = new fs_inode_meta("trash", inode_kind::directory);
 
         // create root, fileinodes, and trash top-level nodes.
-        $ops = [new op_move($r->tick(), null, $meta1, $root_id = $this->new_ino()),
-                new op_move($r->tick(), null, $meta2, $fileinodes_id = $this->new_ino()),
-                new op_move($r->tick(), null, $meta3, $trash_id = $this->new_ino()),
+        $ops = [$this->new_opmove(null, $meta1, $root_id),
+                $this->new_opmove(null, $meta2, $fileinodes_id),
+                $this->new_opmove(null, $meta3, $trash_id),
         ];
 
         $r->apply_ops($ops);
@@ -348,7 +356,7 @@ class filesystem {
 
         // 3. create tree node under /root/../parent_id
         $fim = new fs_inode_meta($name, inode_kind::directory);
-        $ops[] = new op_move($r->tick(), $parent_ino, $fim, $ino = $this->new_ino() );
+        $ops[] = $this->new_opmove($parent_ino, $fim, $ino);
 
         $r->apply_ops($ops);
 
@@ -377,7 +385,7 @@ class filesystem {
 
         // 5. Generate op to move dir node to trash.
         list($trash_id) = $this->trash();
-        $ops[] = new op_move($r->tick(), $trash_id, null, $ino);
+        $ops[] = $this->new_opmove($trash_id, null, $ino);
 
         $r->apply_ops($ops);
     }
@@ -393,7 +401,7 @@ class filesystem {
         $node->meta->name = $newname;
 
         // 4. move child to new location/name
-        $ops[] = new op_move($r->tick(), $newparent_ino, $node->meta, $ino);
+        $ops[] = $this->new_opmove($newparent_ino, $node->meta, $ino);
 
         $r->apply_ops($ops);
 
@@ -422,13 +430,13 @@ class filesystem {
         $fim->kind = inode_kind::file;
 
         list($fileinodes_id) = $this->fileinodes($r->state->tree);
-        $ops[] = new op_move($r->tick(), $fileinodes_id, $fim, $ino = $this->new_ino() );
+        $ops[] = $this->new_opmove($fileinodes_id, $fim, $ino);
 
         // 5. create tree entry under /root/../parent_id
         $frm = new fs_ref_meta();
         $frm->name = $name;
         $frm->inode_id = $ino;
-        $ops[] = new op_move($r->tick(), $parent_ino, $frm, $this->new_ino() );
+        $ops[] = $this->new_opmove($parent_ino, $frm, $ino_ref);
 
         $r->apply_ops($ops);
 
@@ -455,7 +463,7 @@ class filesystem {
         $meta->content .= $data;
 
         // Generate op for updating the tree_node metadata
-        $ops[] = new op_move($r->tick(), $tree_node->parent_id, $meta, $file_ino );
+        $ops[] = $this->new_opmove($tree_node->parent_id, $meta, $file_ino );
 
         $r->apply_ops($ops);
     }
@@ -495,13 +503,13 @@ class filesystem {
         $meta->links ++;
 
         // Generate op for updating the target's metadata
-        $ops[] = new op_move($r->tick(), $tree_node->parent_id, $meta, $target_ino );
+        $ops[] = $this->new_opmove($tree_node->parent_id, $meta, $target_ino );
 
         // 5. create tree entry under /root/../parent_id
         $frm = new fs_ref_meta();
         $frm->name = $name;
         $frm->inode_id = $target_ino;
-        $ops[] = new op_move($r->tick(), $parent_ino, $frm, $this->new_ino() );
+        $ops[] = $this->new_opmove($parent_ino, $frm, $ino_ref);
 
         $r->apply_ops($ops);
 
@@ -525,15 +533,15 @@ class filesystem {
 
         // 3. move child to trash.  (delete)
         list($trash_id) = $this->trash();
-        $ops[] = new op_move($r->tick(), $trash_id, null, $node_id );
+        $ops[] = $this->new_opmove($trash_id, null, $node_id );
 
         // 5a. If link count is zero, move inode to trash.
         if($meta->links == 0) {
-            $ops[] = new op_move($r->tick(), $trash_id, null, $node->meta->inode_id );
+            $ops[] = $this->new_opmove($trash_id, null, $node->meta->inode_id );
         } 
         // 5b. else, update link count.
         else {
-            $ops[] = new op_move($r->tick(), $inode->parent_id, $meta, $node->meta->inode_id);
+            $ops[] = $this->new_opmove($inode->parent_id, $meta, $node->meta->inode_id);
         }
 
         $r->apply_ops($ops);
@@ -553,7 +561,7 @@ class filesystem {
         // 3. create tree node under /root/../parent_id
         $fim = new fs_inode_meta($name, inode_kind::symlink);
         $fim->link = $link;   // we are setting a non-existent property, gross!  but in PHP we can roll like that.
-        $ops[] = new op_move($r->tick(), $parent_ino, $fim, $new_ino = $this->new_ino() );
+        $ops[] = $this->new_opmove($parent_ino, $fim, $new_ino );
 
         $r->apply_ops($ops);
 
@@ -914,6 +922,8 @@ function test_fs_filename_collision() {
 
         $fs1->apply_merge_log_ops($fs2->replica->state->log_op_list);
         $fs2->apply_merge_log_ops($fs1->replica->state->log_op_list);
+
+        $fs1->print_current_state("merged ops from replica2. (replica1");
     }
 
     if($fs1->is_equal($fs2)) {
@@ -921,8 +931,8 @@ function test_fs_filename_collision() {
     } else {
         echo "\n== Fail!  replica1 and replica2 filesystems do not match. ==\n";
     }
-    $fs1->print_current_state("created /home/bob.  (replica1 state)");
-    $fs2->print_current_state("created /home/bob.  (replica2 state)");
+    $fs1->print_current_state("final state.  (replica1 state)");
+    $fs2->print_current_state("final state.  (replica2 state)");
 }
 
 
@@ -960,7 +970,7 @@ function test_fs_filename_collision_lww() {
     $fs2->print_current_state("created /tmp/file1.txt.  (replica2)");
 
     // uncomment to test concurrent creation of conflict filename.
-    $fs1->mknod($ino_tmp, "file1.txt.conflict.1", 'c' );
+    // $fs1->mknod($ino_tmp, "file1.txt.conflict.1", 'c' );
 
     $fs2->apply_merge_log_ops_lww($fs1->replica->state->log_op_list);
     $fs1->apply_merge_log_ops_lww($fs2->replica->state->log_op_list);
@@ -985,8 +995,8 @@ function test_fs_filename_collision_lww() {
     } else {
         echo "\n== Fail!  replica1 and replica2 filesystems do not match. ==\n";
     }
-    $fs1->print_current_state("created /home/bob.  (replica1 state)");
-    $fs2->print_current_state("created /home/bob.  (replica2 state)");
+    $fs1->print_current_state("final state.  (replica1 state)");
+    $fs2->print_current_state("final state.  (replica2 state)");
 }
 
 
